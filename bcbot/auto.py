@@ -675,6 +675,27 @@ class AutoTrader:
         """Disarm at once (also what the kill file does)."""
         self.disarm("kill", who)
 
+    def set_ladder(self, on: bool, who: str = "operator") -> str:
+        """Switch the real compensate ladder on or off for the current arming, without disarming.  Logged.  If the
+        stake of the round being prepared changes, the amount box is filled again (else that round is skipped)."""
+        c = self.cfg
+        if not self.armed:
+            raise TradeError("not armed: tick the box and press ARM (the ladder is chosen when arming)")
+        if on and len(c.auto_real_ladder) < 2:
+            raise TradeError("no ladder is configured: set AUTO_REAL_LADDER (e.g. 1,2) in .env first")
+        before = self.stake()
+        self.ladder_forced = bool(on)
+        self._event("ladder", who=who, on=self.ladder_on(), stake=self.stake())
+        try:
+            if self._prepared_rid and self.stake() != before:
+                asyncio.get_running_loop().create_task(self._prepare(self._prepared_rid))
+        except RuntimeError:                      # no event loop (a test)
+            pass
+        msg = (f"compensate ladder {'ON' if self.ladder_on() else 'OFF'} for this arming: next real stake "
+               f"${self.stake():g} (losses in a row {self.real_run})")
+        log.warning(msg)
+        return msg
+
     def reset_run(self, ack_run: int, reason: str, who: str = "operator") -> str:
         """Set the run of real losses back to 0 by hand: the operator's decision (a new model, a new experiment),
         typed with the current count and a reason, written to the events log and kept across restarts (real orders

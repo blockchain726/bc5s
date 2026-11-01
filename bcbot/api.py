@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 
 def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Application:
-    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run")
+    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run", "ladder")
 
     def money_auth(request: web.Request) -> web.Response | None:
         """The token check for anything that can arm, disarm or spend: refused without a configured token."""
@@ -100,6 +100,8 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                 auto.clear(str(body["clear"]), body.get("outcome"), who="api")
             if body.get("reset_run"):
                 auto.reset_run(int(body.get("ack_run", -1)), str(body.get("reason", "")), who="api")
+            if "ladder" in body and not body.get("arm"):             # switch the ladder while armed
+                auto.set_ladder(bool(body["ladder"]), who="api")
         except TradeError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=409)
         except (ValueError, TypeError):
@@ -211,6 +213,9 @@ async function post(body) {
   if (!d.error) state(d);
   return {ok: !d.error, err, d};
 }
+function result(ok, text) {                      // a visible result line under the buttons
+  const m = document.getElementById('msg'); m.style.color = ok ? '#22d27a' : '#ff5468'; m.textContent = text;
+}
 const localDay = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; };
 async function armClick() {
   let d; try { d = await (await fetch('/auto' + q)).json(); } catch (e) { return; }
@@ -235,6 +240,15 @@ async function resetClick() {
   alert(res.ok ? 'Real losses in a row set to 0.' : 'NOT reset: ' + res.err);
 }
 document.querySelector('[data-arm]').onclick = armClick;
+document.getElementById('armladder').onchange = async e => {     // while live: switch the ladder now
+  const box = e.target;
+  let d; try { d = await (await fetch('/auto' + q)).json(); } catch (err) { return; }
+  if (d.state !== 'ARMED') { result(true, box.checked ? 'ladder will be used when you press ARM real' : 'flat $1 when you press ARM real'); return; }
+  const res = await post({ladder: box.checked});
+  if (!res.ok) box.checked = !box.checked;
+  result(res.ok, res.ok ? (res.d.ladder_on ? 'compensate ladder ON: next real stake $' + res.d.next_real_stake : 'ladder OFF: flat $' + res.d.next_real_stake)
+                        : 'ladder not changed: ' + res.err);
+};
 document.querySelector('[data-reset]').onclick = resetClick;
 // ---- losing runs: how many losses in a row, how often, and what a x2 ladder pays at each length ----
 const MODEL_NAMES = {sign: 'HawkesSign', time: 'HawkesTime', mhh: 'MHH flow', mhh_hi: 'MHH confident', agree: 'Sign+MHH agree', mom: 'Momentum 5s', book: 'Strong book', bookmom: 'Book + trend', momvol: 'Momentum, volatile only', revert: 'Quiet reversal', overshoot: 'Overshoot', overshoot_book: 'Overshoot + book', prob: 'P(UP) model (logistic, fitted on the log, calls at |P-0.5| >= 0.06)', gbm: 'P(UP) trees (LightGBM)', ens: 'P(UP) ensemble (average of both)', pool: 'Pool: thin side when it pays > x2 (scored only)'};
@@ -309,7 +323,8 @@ function state(d) {
   ab.textContent = armed ? 'LIVE · real $' + (d.next_real_stake || d.next_stake || 1) + (d.ladder_on ? ' (ladder)' : '') : 'ARM real';
   document.getElementById('realst').innerHTML = armed ? '<b style="color:#ff5468">LIVE</b>' :
     d.state === 'STOPPED' ? `<b style="color:#f59e0b">STOPPED</b> <span style="color:#8793a2">${d.stop_reason || ''}</span>` : '<span style="color:#8793a2">paper</span>';
-  document.getElementById('armladder').disabled = armed;
+  if (armed && document.activeElement !== document.getElementById('armladder'))
+    document.getElementById('armladder').checked = !!d.ladder_on;     // while live the box shows the bot's state
 }
 document.querySelectorAll('[data-model]').forEach(b => b.onclick = () => post({model: b.dataset.model}));
 document.querySelectorAll('[data-prog]').forEach(b => b.onclick = () => post({progression: Number(b.dataset.prog)}));

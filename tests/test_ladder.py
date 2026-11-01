@@ -52,3 +52,19 @@ def test_ladder_forced_at_arming_while_gate_closed(tmp_path):
     a.arm(1, today, force=True, ladder=True)
     a._hard_stop("test stop")                             # and with a stop
     assert not a.ladder_forced and a.state == "STOPPED"
+
+
+def test_ladder_switched_while_armed(tmp_path):
+    import pytest
+    from bcbot.trader import TradeError
+    a = bot(tmp_path, (1.0, 2.0), gate_open=False)
+    a.on = True
+    with pytest.raises(TradeError):
+        a.set_ladder(True)                                # not armed: chosen at arming instead
+    a.arm(0, time.strftime("%Y-%m-%d"), force=True)      # armed flat
+    a.real_run = 1
+    assert a.stake() == 1.0
+    a.set_ladder(True)                                    # switched on while live: x2 after the loss
+    assert a.state == "ARMED" and a.ladder_on() and a.stake() == 2.0
+    a.set_ladder(False)                                   # and off again, still live
+    assert a.state == "ARMED" and not a.ladder_on() and a.stake() == 1.0
