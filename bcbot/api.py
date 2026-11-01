@@ -149,7 +149,12 @@ button.liveb.on{background:#b4232f;border-color:#b4232f}#msg{color:#f0b429;min-h
 <div class="bar">
   <div class="grp"><span>calls by</span><button data-model="sign">HawkesSign</button><button data-model="mhh">MHH flow</button><button data-model="agree" title="bet only when HawkesSign and MHH call the same side">Sign+MHH agree</button><button data-model="mom" title="the direction of our price over the last 5 s">Momentum 5s</button><button data-model="book" title="bet with Binance's 20-level book, only when it is strongly lopsided">Strong book</button><button data-model="bookmom" title="only when the strong book and the last 5 s of price point the same way">Book + trend</button><button data-model="revert" title="quiet market: bet that bc.game's price undoes its last 2-second move">Quiet reversal</button><button data-model="overshoot" title="bc.game ran ahead of the market: bet the snap-back">Overshoot</button><button data-model="prob" title="P(UP) fitted on all logged rounds; calls only when it is at least 56% one way">P(UP) model</button><button data-model="ens" title="average of the logistic and LightGBM P(UP); calls only when it is at least 56% one way">P(UP) ensemble</button></div>
   <div class="grp"><span>paper ladder after a loss</span><button data-prog="1">flat $1</button><button data-prog="1.5">x1.5</button><button data-prog="2">x2 (MHH)</button></div>
-  <div class="grp"><span>real orders</span><button data-live="0" title="disarm (arming is done in the terminal: live arm run=N day=YYYY-MM-DD)">paper / disarm</button></div>
+  <div class="grp"><span>real orders</span><span id="realst"></span>
+    <button data-arm="1" class="liveb" title="allow real orders by the calling model: a confirmation shows the stake and every stop">ARM real</button>
+    <label title="stake x1 after a win, x2 after a loss (AUTO_REAL_LADDER), for this arming although the gate is closed"><input type="checkbox" id="armladder"> compensate ladder</label>
+    <button data-live="0" title="disarm: back to paper">paper / disarm</button>
+    <button data-reset="1" title="set the run of real losses back to 0 (your decision; written to the events log)">losses &rarr; 0</button>
+    <input type="password" id="tok" placeholder="API token (from .env)" title="the API_TOKEN from .env; kept in this browser only" style="font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:5px 8px;width:150px"></div>
   <div class="grp"><a href="/tap" style="color:#5aa9ff;text-decoration:none;border:1px solid #2c3440;border-radius:6px;padding:5px 10px">Tap analyzer &rarr;</a></div>
 </div>
 <div id="safety" style="color:#8793a2"></div>
@@ -173,10 +178,40 @@ button.liveb.on{background:#b4232f;border-color:#b4232f}#msg{color:#f0b429;min-h
 </main>
 <script>
 const q = location.search;
+const tokBox = document.getElementById('tok');
+tokBox.value = localStorage.apiToken || '';
+tokBox.onchange = () => { localStorage.apiToken = tokBox.value.trim(); document.getElementById('msg').textContent = tokBox.value.trim() ? 'token saved in this browser' : 'token removed'; };
 async function post(body) {
-  const r = await fetch('/auto' + q, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
-  const d = await r.json(); document.getElementById('msg').textContent = d.error || ''; state(d);
+  const headers = {'Content-Type': 'application/json'};
+  const tok = (localStorage.apiToken || tokBox.value || '').trim();
+  if (tok) headers['Authorization'] = 'Bearer ' + tok;
+  const r = await fetch('/auto' + q, {method: 'POST', headers, body: JSON.stringify(body)});
+  const d = await r.json();
+  document.getElementById('msg').textContent = d.error ? d.error + (r.status === 401 || r.status === 403 ? '  (paste the API_TOKEN from .env in the token box)' : '') : '';
+  if (!d.error) state(d);
 }
+const localDay = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; };
+async function armClick() {
+  let d; try { d = await (await fetch('/auto' + q)).json(); } catch (e) { return; }
+  const lad = document.getElementById('armladder').checked, g = d.gate || {};
+  const stake = lad && (d.real_ladder || []).length > 1 ? 'ladder $' + d.real_ladder.map(x => x * (d.next_stake || 1)).join(' / $') + ' (x1 after a win, x2 after a loss)' : 'flat $' + (d.next_stake || 1);
+  const txt = `ARM REAL ORDERS by ${MODEL_NAMES[d.model] || d.model}?\n\n` +
+    `stake: ${stake}\nreal losses in a row now: ${d.real_run} / ${d.max_real_run}` +
+    (d.real_run >= d.max_real_run ? '  (past the limit: this arming allows ONE order; a loss stops it again)' : '') +
+    `\nbudget left today: $${(d.budget_left || 0).toFixed(2)} · orders today: ${d.attempts_today} / ${d.max_real_bets_day} · campaign: ${(d.campaign_pnl || 0).toFixed(2)}` +
+    `\nstops: ${d.max_real_run} losses in a row, the day's budget, the order count, the campaign limit, 4 h` +
+    `\n\nthe gate is ${g.open ? 'OPEN' : 'CLOSED (no proven edge yet): your decision, logged'}.`;
+  if (!confirm(txt)) return;
+  post({arm: true, ack_run: d.real_run, day: localDay(), force: true, ladder: lad});
+}
+async function resetClick() {
+  let d; try { d = await (await fetch('/auto' + q)).json(); } catch (e) { return; }
+  const reason = prompt(`Set the run of real losses (now ${d.real_run}) back to 0?\nSay why (it goes into the events log):`, 'new model');
+  if (reason == null) return;
+  post({reset_run: true, ack_run: d.real_run, reason: 'dashboard: ' + reason});
+}
+document.querySelector('[data-arm]').onclick = armClick;
+document.querySelector('[data-reset]').onclick = resetClick;
 // ---- losing runs: how many losses in a row, how often, and what a x2 ladder pays at each length ----
 const MODEL_NAMES = {sign: 'HawkesSign', time: 'HawkesTime', mhh: 'MHH flow', mhh_hi: 'MHH confident', agree: 'Sign+MHH agree', mom: 'Momentum 5s', book: 'Strong book', bookmom: 'Book + trend', momvol: 'Momentum, volatile only', revert: 'Quiet reversal', overshoot: 'Overshoot', overshoot_book: 'Overshoot + book', prob: 'P(UP) model (logistic, fitted on the log, calls at |P-0.5| >= 0.06)', gbm: 'P(UP) trees (LightGBM)', ens: 'P(UP) ensemble (average of both)', pool: 'Pool: thin side when it pays > x2 (scored only)'};
 function every(hours, n) {
@@ -240,7 +275,7 @@ function safetyLine(d) {
   const st = d.state === 'ARMED' ? '<b style="color:#ff5468">LIVE (armed)</b>' :
              d.state === 'STOPPED' ? `<b style="color:#f59e0b">STOPPED</b> (${d.stop_reason || ''})` : 'paper';
   document.getElementById('safety').innerHTML =
-    `real orders: ${st} &middot; real losses in a row <b>${d.real_run}</b>/${d.max_real_run} (only a real WIN resets it) ` +
+    `real orders: ${st} &middot; real losses in a row <b>${d.real_run}</b>/${d.max_real_run} (a real WIN or the reset button resets it) ` +
     `&middot; orders today ${d.attempts_today}/${d.max_real_bets_day} &middot; budget left $${(d.budget_left || 0).toFixed(2)} ` +
     `&middot; campaign ${(d.campaign_pnl || 0) >= 0 ? '+' : ''}${(d.campaign_pnl || 0).toFixed(2)} ` +
     `&middot; balance ${d.balance_usd != null ? '$' + d.balance_usd.toFixed(2) : '–'} ` +
@@ -254,6 +289,12 @@ function state(d) {
   document.querySelectorAll('[data-model]').forEach(b => b.classList.toggle('on', b.dataset.model === d.model));
   document.querySelectorAll('[data-prog]').forEach(b => b.classList.toggle('on', Number(b.dataset.prog) === d.progression));
   document.querySelectorAll('[data-live]').forEach(b => b.classList.toggle('on', !d.live_wanted));
+  const armed = d.state === 'ARMED', ab = document.querySelector('[data-arm]');
+  ab.classList.toggle('on', armed); ab.disabled = armed;
+  ab.textContent = armed ? 'LIVE · real $' + (d.next_real_stake || d.next_stake || 1) + (d.ladder_on ? ' (ladder)' : '') : 'ARM real';
+  document.getElementById('realst').innerHTML = armed ? '<b style="color:#ff5468">LIVE</b>' :
+    d.state === 'STOPPED' ? `<b style="color:#f59e0b">STOPPED</b> <span style="color:#8793a2">${d.stop_reason || ''}</span>` : '<span style="color:#8793a2">paper</span>';
+  document.getElementById('armladder').disabled = armed;
 }
 document.querySelectorAll('[data-model]').forEach(b => b.onclick = () => post({model: b.dataset.model}));
 document.querySelectorAll('[data-prog]').forEach(b => b.onclick = () => post({progression: Number(b.dataset.prog)}));
