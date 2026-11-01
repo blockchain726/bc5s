@@ -391,6 +391,7 @@ class AutoTrader:
         self.stop_reason: str | None = None
         self.tech_stop: str | None = None  # a stop that needs 'live clear <this>' before any re-arm
         self.stopped_at = 0.0
+        self.run_reset_at = 0.0            # 'live reset': real orders before this time don't count in the run
         self.armed_at = 0.0
         self.rearm_grant = False           # beyond the run limit: a re-arm allows exactly one real order
         self.rearms = 0
@@ -543,6 +544,7 @@ class AutoTrader:
         data = {"real_run": self.real_run, "updated": time.time(), "campaign_since": self.campaign_since,
                 "campaign_pnl": round(self.campaign_pnl, 4), "state": self.state, "stop_reason": self.stop_reason,
                 "tech_stop": self.tech_stop, "stopped_at": self.stopped_at, "rearms": self.rearms,
+                "run_reset_at": self.run_reset_at,
                 "unknown": self.unknown, "cleared": self.cleared, "day": self.day, "attempts_today": self.attempts_today}
         err = None
         for attempt in range(8):                  # Windows: another program (an editor, a scanner) may hold the
@@ -568,6 +570,7 @@ class AutoTrader:
         self.campaign_since = float(st.get("campaign_since") or 0.0)
         self.stop_reason, self.tech_stop = st.get("stop_reason"), st.get("tech_stop")
         self.stopped_at, self.rearms = float(st.get("stopped_at") or 0.0), int(st.get("rearms") or 0)
+        self.run_reset_at = float(st.get("run_reset_at") or 0.0)
         self.unknown, self.cleared = list(st.get("unknown") or []), list(st.get("cleared") or [])
 
     def _check_start(self) -> None:
@@ -660,6 +663,33 @@ class AutoTrader:
     def kill(self, who: str = "operator") -> None:
         """Disarm at once (also what the kill file does)."""
         self.disarm("kill", who)
+
+    def reset_run(self, ack_run: int, reason: str, who: str = "operator") -> str:
+        """Set the run of real losses back to 0 by hand: the operator's decision (a new model, a new experiment),
+        typed with the current count and a reason, written to the events log and kept across restarts (real orders
+        before it no longer count).  Today's budget, the order count and the campaign loss are untouched."""
+        c = self.cfg
+        if int(ack_run) != self.real_run:
+            raise TradeError(f"acknowledge the current count exactly: live reset run={self.real_run} <reason>")
+        reason = (reason or "").strip()
+        if len(reason) < 3:
+            raise TradeError("say why (for example 'new model overshoot'); it goes into the events log")
+        if self.tech_stop:
+            raise TradeError(f"stopped: {self.stop_reason}. Check the site, then 'live clear {self.tech_stop}' first")
+        if self.state == "STOPPED" and time.time() - self.stopped_at < c.auto_rearm_cooloff_min * 60:
+            left = c.auto_rearm_cooloff_min * 60 - (time.time() - self.stopped_at)
+            raise TradeError(f"stopped {self.stop_reason}; the cool-off ends in {left / 60:.0f} min")
+        was = self.real_run
+        self.real_run, self.run_reset_at, self.rearm_grant = 0, time.time(), False
+        if self.state == "STOPPED":
+            self.state, self.stop_reason = "DISARMED", None
+        self._save_state()
+        self._event("run_reset", who=who, was=was, reason=reason)
+        msg = (f"real losses in a row set to 0 (was {was}): {reason}. Real orders before now no longer count in the "
+               f"run; the budget, the order count and the campaign loss still do. Arm with: live arm run=0 "
+               f"day={time.strftime('%Y-%m-%d')}")
+        log.warning(msg)
+        return msg
 
     def clear(self, what: str, outcome: str | None = None, who: str = "operator") -> str:
         """Clear a technical stop after the operator checked the site.  For an unknown order say what happened:
@@ -1618,6 +1648,8 @@ class AutoTrader:
         reals.sort(key=lambda x: x[0])
         run = 0
         for t, result, lv, rid in reals:              # the run of real losses, in time order; ties leave it
+            if t < self.run_reset_at:                 # before a typed 'live reset': not counted
+                continue
             if lv.get("unknown"):
                 if rid not in self.cleared:
                     run += 1                          # an order that may have been placed counts as lost
@@ -2014,6 +2046,7 @@ class AutoTrader:
             "today_live_pnl": round(self.day_live_pnl, 4), "daily_loss_usd": c.auto_daily_loss_usd,
             "budget_left": round(self.budget_left(), 4),
             "campaign_pnl": round(self.campaign_pnl, 4), "campaign_since": self.campaign_since or None,
+            "run_reset_at": self.run_reset_at or None,
             "campaign_loss_usd": c.auto_campaign_loss_usd,
             "balance": self.balance, "balance_currency": self.balance_currency, "balance_usd": self.balance_usd,
             "balance_age": round(time.time() - self.balance_at, 1) if self.balance_at else None,

@@ -6,6 +6,7 @@
   POST /auto   {"on": true, "model": "mhh", "progression": 1.5}   -> auto mode, calling model, paper progression
   POST /auto   {"arm": true, "ack_run": 0, "day": "2026-10-30", "force": false}  -> allow real orders (typed ack)
   POST /auto   {"live": false} | {"kill": true} | {"clear": "unknown", "outcome": "none"}
+               {"reset_run": true, "ack_run": 6, "reason": "new model"}  -> the run of real losses back to 0 (logged)
   GET  /                                -> decision dashboard (the same panel the bot draws on the BC page)
   GET  /tap, /tap/state                 -> Tap analyzer (paper only): bc.game's Tap grid for BTC/USD, our EV,
                                            virtual and paper taps, other players' results
@@ -28,7 +29,7 @@ log = logging.getLogger(__name__)
 
 
 def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Application:
-    MONEY_KEYS = ("arm", "live", "kill", "clear")
+    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run")
 
     def money_auth(request: web.Request) -> web.Response | None:
         """The token check for anything that can arm, disarm or spend: refused without a configured token."""
@@ -96,6 +97,8 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                 auto.disarm("live off", who="api")
             if body.get("clear"):
                 auto.clear(str(body["clear"]), body.get("outcome"), who="api")
+            if body.get("reset_run"):
+                auto.reset_run(int(body.get("ack_run", -1)), str(body.get("reason", "")), who="api")
         except TradeError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=409)
         except (ValueError, TypeError):

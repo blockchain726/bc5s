@@ -245,3 +245,31 @@ def test_manual_order_refused_when_not_armed(tmp_path):
     a.round = {"id": 1, "status": BETTING, "tradeCutoffTime": (time.time() + 5) * 1000}
     with pytest.raises(TradeError):
         asyncio.run(a.manual_order("up", 1.0))
+
+
+def test_run_reset_is_typed_logged_and_kept_across_restarts(tmp_path):
+    t0 = time.time() - 3600
+    write_rounds(tmp_path / "auto_rounds.jsonl", list("WLLLLLL"), t0)
+    a = trader_for(tmp_path, auto_rearm_cooloff_min=0)
+    a.on = True
+    a.stopped_at = 0.0
+    assert a.real_run == 6 and a.state == "STOPPED"
+    with pytest.raises(TradeError):
+        a.reset_run(5, "new model")                      # wrong count
+    with pytest.raises(TradeError):
+        a.reset_run(6, "")                               # no reason
+    assert a.real_run == 6
+    a.reset_run(6, "new model overshoot")
+    assert a.real_run == 0 and a.state == "DISARMED" and a.run_reset_at > 0
+    a2 = trader_for(tmp_path)                            # a restart keeps the reset: the old losses no longer count
+    assert a2.real_run == 0 and a2.state == "DISARMED"
+    events = [json.loads(line) for line in (tmp_path / "live_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(e.get("event") == "run_reset" and e.get("was") == 6 for e in events)
+    a2.on = True                                         # a real loss after the reset counts again
+    a2.arm(0, time.strftime("%Y-%m-%d"), force=True)
+    assert a2.state == "ARMED" and not a2.rearm_grant
+    rec = {"id": 3000, "cutoff": time.time() + 3, "live": {"ok": True, "stake": 1.0, "amount": 1.0, "payout_pct": 194},
+           "live_pnl": -1.0, "result": "LOSS", "call": "UP"}
+    a2.pending_real[3000] = 1.0
+    a2._real_settled(rec, "LOSS")
+    assert a2.real_run == 1 and a2.state == "ARMED"

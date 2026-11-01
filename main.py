@@ -36,6 +36,7 @@ HELP = """Commands (amount is in the account's trading currency, shown by 'statu
                   loss; it never resumes by itself. Past the run limit a re-arm allows ONE order.
   live off        disarm (also: create the file logs/KILL)
   live clear <reason> [won|lost|none]   clear a technical stop after you checked the site
+  live reset run=<n> <reason>   set the run of real losses back to 0 (your decision; logged, kept across restarts)
   model <name>    which model makes the calls: sign|mhh|agree|mom|book|bookmom|momvol|revert|overshoot|
                   overshoot_book|prob|gbm|ens (P(UP) fitted on the logged rounds: logistic, LightGBM trees,
                   or their average; each calls only when it is
@@ -118,10 +119,18 @@ async def repl(trader: Trader, auto: AutoTrader, cfg: config.Config) -> None:
                     print(auto.live_line())
                 elif args[0] == "clear" and len(args) >= 2:
                     print(auto.clear(args[1], args[2] if len(args) > 2 else None, who="terminal"))
+                elif args[0] == "reset":
+                    kv = dict(a.split("=", 1) for a in args[1:] if "=" in a)
+                    if "run" not in kv or len(args) < 3:
+                        print(f"live reset run=<losses in a row> <reason>   (now: run={auto.real_run})")
+                        continue
+                    print(auto.reset_run(int(kv["run"]), " ".join(a for a in args[2:] if "=" not in a), who="terminal"))
+                    print(auto.live_line())
                 elif args[0] == "on":
                     print(f"'live on' is gone. Arm with: live arm run={auto.real_run} day={time.strftime('%Y-%m-%d')}")
                 else:
-                    print("live | live arm run=<n> day=<date> [force] | live off | live clear <reason> [won|lost|none]")
+                    print("live | live arm run=<n> day=<date> [force] | live off | live clear <reason> [won|lost|none] "
+                          "| live reset run=<n> <reason>")
             elif cmd in ("up", "u", "dn", "down", "d"):
                 amount = float(args[0]) if args else last_amount
                 r = await auto.manual_order(cmd, amount, who="terminal")
