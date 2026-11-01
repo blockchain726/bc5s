@@ -118,6 +118,25 @@ CURVE_JS = r"""
     if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) {
       cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); }
     const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, r.width, r.height);
+    // each round's 5 s window as on the dashboard: start line (dashed) and end line (solid), gray while it runs,
+    // green / red once bc.game settled it, with the result at the end line
+    const vline = (x, w) => { g.lineWidth = w; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, r.height); g.stroke(); };
+    g.font = 'bold 11px Consolas, monospace'; g.textAlign = 'left';
+    for (const rd of (d.rounds || [])) {
+      if (!rd.start || !rd.end || rd.end < tLast - 61 || rd.start > tLast + 29) continue;
+      const xs = Math.max(0, X(rd.start)), xe = Math.min(r.width, X(rd.end));
+      const rgb = rd.tie ? '148,163,184' : rd.win === 'UP' ? '34,210,122' : rd.win === 'DOWN' ? '255,84,104' : null;
+      g.fillStyle = rgb ? `rgba(${rgb},0.16)` : 'rgba(148,163,184,0.14)';
+      g.fillRect(xs, 0, Math.max(0, xe - xs), r.height);
+      g.strokeStyle = rgb ? `rgb(${rgb})` : '#cbd5e1';
+      if (X(rd.start) >= 0 && X(rd.start) <= r.width) {
+        g.setLineDash([4, 3]); vline(X(rd.start), 1.2); g.setLineDash([]);
+        g.fillStyle = rgb ? `rgb(${rgb})` : '#cbd5e1'; g.fillText('start', X(rd.start) + 3, 40); }
+      if (X(rd.end) >= 0 && X(rd.end) <= r.width) {
+        vline(X(rd.end), rgb ? 2.5 : 1.5);
+        g.fillStyle = rgb ? `rgb(${rgb})` : '#cbd5e1';
+        g.fillText(rd.tie ? 'TIE' : rd.win === 'UP' ? '▲ UP' : rd.win === 'DOWN' ? '▼ DOWN' : 'end', X(rd.end) + 4, 40); }
+    }
     const pts = (d.our || []).filter(q => q[0] >= tLast - 61 && q[0] <= tLast + 0.6).map(q => [X(q[0]), Y(q[1])]);
     if (pts.length < 2) return;
     for (const [w, c] of [[4, 'rgba(0,0,0,0.55)'], [1.7, '#22d3ee']]) {
@@ -128,11 +147,8 @@ CURVE_JS = r"""
     g.font = 'bold 12px Consolas, monospace'; g.textAlign = 'right';
     const txt = 'our ' + pOur.toFixed(2) + (pNow != null ? '  (bc ' + (pNow - pOur >= 0 ? '+' : '') + (pNow - pOur).toFixed(2) + ')' : '');
     const tw = g.measureText(txt).width, ly = Math.min(r.height - 8, Math.max(14, last[1] + (last[1] < r.height / 2 ? 18 : -10)));
-    g.fillStyle = 'rgba(11,14,19,0.8)'; g.fillRect(last[0] - 10 - tw - 4, ly - 11, tw + 8, 15);
-    g.fillStyle = '#22d3ee'; g.fillText(txt, last[0] - 10, ly);
-    g.textAlign = 'left'; g.font = '11px Consolas, monospace';
-    g.fillStyle = 'rgba(11,14,19,0.8)'; g.fillRect(r.width * 0.3, r.height - 22, 318, 16);   // bottom, clear of the icons
-    g.fillStyle = '#22d3ee'; g.fillText('— our price: 6-exchange mix, read 0.15 s earlier, at bc.game\'s level', r.width * 0.3 + 4, r.height - 10);
+    g.fillStyle = 'rgba(11,14,19,0.8)'; g.fillRect(last[0] - 70 - tw - 4, ly - 11, tw + 8, 15);
+    g.fillStyle = '#22d3ee'; g.fillText(txt, last[0] - 70, ly);
   };
   st.draw();
 }
@@ -769,6 +785,10 @@ class AutoTrader:
                     if self.trader.page_gone() or await self.trader.widget_crashed():
                         self.last_reload_at = time.time()
                         await self.trader.ensure_ready()
+                    elif time.time() - self.last_reload_at > 90 and await self.trader.launch_refused():
+                        log.warning("bc.game refused to start the game (request_too_fast): reloading the page")
+                        self.last_reload_at = time.time()           # at most once per 90 s, or it stays refused
+                        await self.trader.page.reload(wait_until="domcontentloaded")
                 except Exception as e:
                     log.warning("recovering the browser: %r", e)
             if n % 5 == 0:
@@ -853,8 +873,8 @@ class AutoTrader:
                 rec["feat_late"] = self._features(now, rec, late=True)
             except Exception as e:
                 rec["feat_late"] = {"error": repr(e)[:120]}
-        for old in [k for k in self.recs if k < rid - 50]:
-            self.recs.pop(old, None)
+        for old in sorted(self.recs)[:-50]:          # keep the newest 50 rounds (ids grow by ~1e6 per round,
+            self.recs.pop(old, None)                # so "rid - 50" kept only the current one; the charts need more)
 
     async def _hawkes(self, rid: int, rec: dict) -> None:
         """HawkesTime + HawkesSign forecasts (always scored); the call when the model is sign."""
@@ -1926,8 +1946,15 @@ class AutoTrader:
         the chart's last tick among them by price), and the time of the newest tick."""
         now = self.bc_now()
         ticks = [[t, p] for t, p in list(self.bc_ticks)[-40:]]
+        rounds = [{"start": rec["start"], "end": rec["end"], "win": rec.get("win"), "tie": rec.get("tie", False)}
+                  for rec in list(self.recs.values()) if rec.get("start") and rec.get("end", 0) >= now - 65]
+        r = self.round or {}                      # the round the page shows now, even before it has a record
+        if r.get("priceStartTime") and r.get("priceEndTime"):
+            cur = {"start": r["priceStartTime"] / 1000, "end": r["priceEndTime"] / 1000, "win": None, "tie": False}
+            if not any(abs(x["start"] - cur["start"]) < 0.01 for x in rounds):
+                rounds.append(cur)
         return {"on": True, "our": self.our.series(now - 75, now), "ticks": ticks,
-                "t_last": ticks[-1][0] if ticks else now}
+                "t_last": ticks[-1][0] if ticks else now, "rounds": rounds}
 
     def prices(self, window: float = 60.0, exchanges: bool = False) -> dict:
         """The last `window` seconds of bc.game's BTC price and of our price (the weighted, delayed exchange mix),

@@ -151,6 +151,15 @@ class Trader:
         except Exception:                    # page still loading / navigating: not a crash
             return False
 
+    async def launch_refused(self) -> bool:
+        """bc.game refused to start the game ("...launch_game.request_too_fast": the page was loaded too often)."""
+        try:
+            return await self.page.evaluate(
+                "() => !document.querySelector('#up-down-direction-buttons') && "
+                "!!document.body && document.body.innerText.includes('request_too_fast')")
+        except Exception:
+            return False
+
     async def ensure_ready(self) -> None:
         if self.page_gone():
             await self._recover()
