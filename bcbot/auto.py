@@ -1777,7 +1777,7 @@ class AutoTrader:
         else:
             frac, big, small, cls = 1.0, "&ndash;", PHASE.get(status, "waiting"), ""
             phase = small.upper()
-        frac = min(1.0, max(0.0, frac))
+        frac = min(1.0, max(0.0, frac))              # time used; the bar shows the time LEFT, so it empties like a timer
         bc_now = self.bc_ticks[-1][1] if self.bc_ticks else None
         ours = self.our.now_value()
         start = float(r.get("startPrice") or 0)
@@ -1792,7 +1792,7 @@ class AutoTrader:
                           for w in reversed(self.winners))
         round_card = (
             f'<div class="c {cls}"><div class="ct"><span>ROUND</span><span class="ph">{phase}</span></div>'
-            f'<div class="big">{big}<small>{small}</small></div><div class="pbar"><i style="width:{frac * 100:.0f}%"></i></div>'
+            f'<div class="big">{big}<small>{small}</small></div><div class="pbar"><i style="width:{(1 - frac if cls else 1.0) * 100:.0f}%"></i></div>'
             + row("bc.game", f"{bc_now:,.2f}" if bc_now else "&ndash;")
             + row("our price", f"{ours:,.2f}" if ours else "&ndash;")
             + row("start", f"{start:,.2f}" if start and status != BETTING else "&ndash;")
