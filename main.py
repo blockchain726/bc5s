@@ -37,7 +37,8 @@ HELP = """Commands (amount is in the account's trading currency, shown by 'statu
   live off        disarm (also: create the file logs/KILL)
   live clear <reason> [won|lost|none]   clear a technical stop after you checked the site
   model <name>    which model makes the calls: sign|mhh|agree|mom|book|bookmom|momvol|revert|overshoot|
-                  overshoot_book|prob (prob = P(UP) fitted on the logged rounds, calls only when it is
+                  overshoot_book|prob|gbm|ens (P(UP) fitted on the logged rounds: logistic, LightGBM trees,
+                  or their average; each calls only when it is
                   at least 56% one way).  Older text: (HawkesSign, MHH flow, agree: only
                          when HawkesSign and MHH call the same side, mom: the direction of our price over
                          the last 5 s, book: with Binance's 20-level book when |imbalance| >= 0.7, bookmom:

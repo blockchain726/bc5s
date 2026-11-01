@@ -169,7 +169,7 @@ REVERT_MIN_MOVE = 0.5     # ... and bc.game's own price moved more than this ($)
 # price in that same direction (dev_tick) - it ran ahead of the market and tends to snap back
 OVERSHOOT_VOL_MAX, OVERSHOOT_MOVE, OVERSHOOT_DEV = 1.92, 0.5, 2.0
 OVERSHOOT_BOOK_MOVE, OVERSHOOT_BOOK_DEV, OVERSHOOT_BOOK_OBI = 0.5, 1.0, 0.5
-MODEL_REGISTERED = {"prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
+MODEL_REGISTERED = {"gbm": 1793543190, "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
 
 
 def _book_call(feat: dict | None) -> str | None:
@@ -258,9 +258,9 @@ class AutoTrader:
     MODELS = {"time": "HawkesTime", "sign": "HawkesSign", "mhh": "MHH flow", "agree": "Sign + MHH agree",
               "mom": "Momentum 5s", "book": "Strong book", "bookmom": "Book + trend", "momvol": "Momentum, volatile only",
               "revert": "Quiet reversal", "overshoot": "Overshoot", "overshoot_book": "Overshoot + book",
-              "prob": "P(UP) model"}
+              "prob": "P(UP) model", "gbm": "P(UP) trees", "ens": "P(UP) ensemble"}
     CALLERS = ("sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book",
-               "prob")
+               "prob", "gbm", "ens")
     STATES = ("DISARMED", "ARMED", "STOPPED")
     BREAK_EVEN = 0.5155             # 1 / 1.94: the win rate at which a flat bet breaks even (before pool dilution)
     GATE_MIN_N = 3000               # calls a model must have before its record can open the gate at all
@@ -343,7 +343,7 @@ class AutoTrader:
             self.model = "sign"
         # paper P&L if each model's stakes followed the progression (like the MHH dashboard's ladder P&L)
         self.ladders = {m: {"pnl": 0.0, "staked": 0.0, "biggest": 0.0, "step": 0}
-                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob")}
+                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens")}
 
     # ---------- runtime settings ----------
 
@@ -713,7 +713,10 @@ class AutoTrader:
         """Once a second: the clock's step check, the kill file, the arming's expiry, the hourly P(UP) refit."""
         self.clock.check_step(self.our.clock())
         if (time.time() - self.prob.fitted_at > PROB_REFIT_S and (self._prob_task is None or self._prob_task.done())):
-            self._prob_task = asyncio.ensure_future(asyncio.to_thread(self.prob.fit))
+            try:
+                self._prob_task = asyncio.get_running_loop().create_task(asyncio.to_thread(self.prob.fit))
+            except RuntimeError:                  # no event loop (a test): nothing to schedule
+                pass
         if self.armed and self.cfg.auto_kill_file.exists():
             self.disarm(f"kill file {self.cfg.auto_kill_file.name} present", who="file")
         if self.armed and time.time() - self.armed_at > self.cfg.auto_arm_ttl_h * 3600:
@@ -748,13 +751,15 @@ class AutoTrader:
             except Exception as e:
                 rec["feat"] = {"error": repr(e)[:120]}
             rec["hawkes_task"] = asyncio.ensure_future(self._hawkes(rid, rec))     # never awaited here
-            try:                                                   # P(UP) for every round (scored), the call when "prob"
-                rec["prob"] = self.prob.predict(rec["feat"])
+            try:                                                   # P(UP) for every round (all three scored)
+                ps = self.prob.predict_all(rec["feat"])
+                rec["prob"], rec["prob_gbm"], rec["prob_ens"] = ps["prob"], ps["gbm"], ps["ens"]
             except Exception as e:
-                rec["prob"] = None
-                log.warning("P(UP) model: %r", e)
-            if self.model == "prob":
-                asyncio.ensure_future(self._call(rid, rec, ProbModel.side(rec["prob"])))
+                rec["prob"] = rec["prob_gbm"] = rec["prob_ens"] = None
+                log.warning("P(UP) models: %r", e)
+            if self.model in ("prob", "gbm", "ens"):
+                key = {"prob": "prob", "gbm": "prob_gbm", "ens": "prob_ens"}[self.model]
+                asyncio.ensure_future(self._call(rid, rec, ProbModel.side(rec[key])))
             if self.model == "mom":                                  # momentum calls at snapshot A, at once
                 asyncio.ensure_future(self._call(rid, rec, _mom_call(rec["feat"])))
             elif self.model == "book":                               # strong book: at snapshot A, or no call
@@ -913,6 +918,8 @@ class AutoTrader:
                 for w in (1, 3):
                     d = [v for t, v in devs if t >= now - w]
                     f[f"dev_{w}s"] = sum(d) / len(d) if d else None
+        b05 = bc_at(now - 0.5)                                 # bc.game's index over the last half second
+        f["bc_mom05"] = bc_now - b05 if b05 else None
         for w in ((1,) if late else (1, 2, 5, 10)):           # recent moves
             b0, o0 = bc_at(now - w), our(now - w)
             f[f"bc_mom{w}"] = bc_now - b0 if b0 else None
@@ -948,7 +955,8 @@ class AutoTrader:
             bk = self.book                                    # Binance spot top-20 book (the panel's OB card)
             ages["binance_book"] = round(bk.age(), 2)
             if bk.age() <= 2.0:
-                f.update(obi1=bk.obi1, obi5=bk.obi5, obi20=bk.obi20)
+                f.update(obi1=bk.obi1, obi5=bk.obi5, obi20=bk.obi20, obi_w=bk.obi_w, micro_off=bk.micro_off,
+                         spread_binance=bk.spread)
                 hist = list(bk.hist)
                 if len(hist) > 5:
                     f["obi20_chg5"] = bk.obi20 - hist[-6][1]
@@ -1444,6 +1452,8 @@ class AutoTrader:
                      "revert": _revert_call(rec.get("feat")),
                      "overshoot": _overshoot_call(rec.get("feat")),
                      "prob": ProbModel.side(rec.get("prob")),
+                     "gbm": ProbModel.side(rec.get("prob_gbm")),
+                     "ens": ProbModel.side(rec.get("prob_ens")),
                      "overshoot_book": _overshoot_call(rec.get("feat"), with_book=True),
                      "pool": (rec.get("pool") or _pool_call(rec.get("payouts")) or {}).get("call")}
             for name, side in calls.items():
@@ -1658,9 +1668,11 @@ class AutoTrader:
                 f_ = rec.get("feat") or {}
                 sub = (f"book {(f_.get('obi20') or 0):+.2f} &middot; price 5 s {(f_.get('our_mom5') or 0):+.2f} $ "
                        f"(both the same way, book &ge; {BOOK_MIN})")
-            elif self.model == "prob":
-                sub = (f"P(UP) {rec['prob']:.2f} (calls outside {0.5 - ProbModel.side.__defaults__[0]:.2f}-{0.5 + ProbModel.side.__defaults__[0]:.2f})"
-                       if isinstance(rec.get("prob"), float) else "P(UP) model " + ("ready" if self.prob.model else "not fitted yet"))
+            elif self.model in ("prob", "gbm", "ens"):
+                key = {"prob": "prob", "gbm": "prob_gbm", "ens": "prob_ens"}[self.model]
+                mg = ProbModel.side.__defaults__[0]
+                sub = (f"P(UP) {rec[key]:.2f} (calls outside {0.5 - mg:.2f}-{0.5 + mg:.2f})"
+                       if isinstance(rec.get(key), float) else "P(UP) models " + ("ready" if self.prob.model else "not fitted yet"))
             else:
                 sub = f"HawkesSign P(up) {p.get('sign_p_up', 0):.2f}"
         elif mhh and self.flow.arrays(31) is None:
@@ -1831,7 +1843,7 @@ class AutoTrader:
         models_card = (
             '<div class="c"><div class="ct"><span>MODELS</span><span class="mute">right &middot; flat $1 P&amp;L</span></div>'
             + model_row("sign", "HawkesSign") + model_row("time", "HawkesTime") + model_row("mhh", "MHH flow")
-            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model")
+            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model") + model_row("gbm", "P(UP) trees") + model_row("ens", "P(UP) ensemble")
             + row("our price wrong", f"{(mix_n - mix_ok) / mix_n:.1%} of {mix_n}" if mix_n else "&ndash;") + '</div>')
         return (f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; ROUND #{rid or "&ndash;"}</span>{mode}</div>'
                 f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{models_card}</div>')
@@ -1917,7 +1929,7 @@ class AutoTrader:
             "bitfinex_agrees_with_bc": round(s["bfx_agree"] / s["bfx_n"], 4) if s["bfx_n"] else None,
             "records": {name: {"called": s.get(f"{name}_called", 0), "correct": s.get(f"{name}_correct", 0),
                                "pnl": s.get(f"{name}_pnl", 0.0)}
-                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "pool")},
+                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "pool")},
             "prob_model": self.prob.info(),
             "stats": s, "last": self.last,
         }

@@ -86,6 +86,9 @@ class BinanceBook:
 
     def __init__(self) -> None:
         self.obi1 = self.obi5 = self.obi20 = 0.0
+        self.obi_w = 0.0                          # depth-weighted imbalance: level k weighted 1/(1+k), 20 levels
+        self.micro_off = 0.0                      # microprice minus mid ($): size-weighted best quotes
+        self.spread = 0.0                         # best ask minus best bid ($)
         self.hist: deque = deque(maxlen=240)      # (sec, obi20) once a second, for the trend line
         self.connected = False
         self.at = 0.0                             # local time of the last book update
@@ -117,6 +120,17 @@ class BinanceBook:
             b, a = sum(float(q) for _, q in bids[:n]), sum(float(q) for _, q in asks[:n])
             return (b - a) / (b + a) if b + a > 0 else 0.0
         self.obi1, self.obi5, self.obi20 = imb(1), imb(5), imb(20)
+        wb = sum(float(q) / (1 + k) for k, (_, q) in enumerate(bids[:20]))
+        wa = sum(float(q) / (1 + k) for k, (_, q) in enumerate(asks[:20]))
+        self.obi_w = (wb - wa) / (wb + wa) if wb + wa > 0 else 0.0
+        try:
+            pb, qb = float(bids[0][0]), float(bids[0][1])
+            pa, qa = float(asks[0][0]), float(asks[0][1])
+            if qb + qa > 0:
+                self.micro_off = (pb * qa + pa * qb) / (qb + qa) - (pb + pa) / 2
+            self.spread = pa - pb
+        except (ValueError, IndexError):
+            pass
         self.at = time.time()
         sec = int(self.at)
         if not self.hist or self.hist[-1][0] != sec:
