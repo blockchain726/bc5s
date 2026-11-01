@@ -307,6 +307,20 @@ reversal 53.3% of 1,198, momentum 50.6%.  So the model equals the best rule and 
 one dial (margin <-> calls/h).  The paper caller since 14:04 UTC.  Also logged from now on: dev_mean60, dev_std60,
 dev_z60 (the gap's z-score against the last minute), for the next model version.
 
+The user's research note (2026-11-01: Binance L2 microstructure features, cross-exchange divergence, XGBoost + TCN
+ensemble, 7 s horizon, "identify the settlement price"), checked against our data:
+- Settlement price: bc.game's own index (every model already targets it); Binance's window move has its sign only
+  ~78% of the time, our 6-exchange mix 0.88 correlated with its $ move.
+- Lead-lag (10 min of live ticks, 0.25 s steps): our mix leads bc.game's index by ~0.5 s (corr 0.30 at +0.5 s, ~0
+  beyond +1 s) - sub-second features cannot reach a decision made 2-3 s before the window.
+- Gradient boosting (LightGBM, same walk-forward harness, 3,459 rounds): 51.1% on all rounds vs 52.4% logistic;
+  at margin 0.06 56.2% of 276 vs 57.9% of 399; the average of both 56.5% of 260.  Same top input (dev_tick).
+  Consistent with Wang 2025 (arXiv 2506.05764: better inputs beat deeper models) and OpenMarket 2026 (arXiv
+  2607.26245: a 43-feature walk-forward logit did not beat the market out of sample).  A TCN needs far more than
+  5k rounds.
+- Built anyway as the forward test the user asked for (branch micro-ensemble): `gbm`, `ens` (fixed 14:26 UTC), plus
+  micro_off / obi_w / spread_binance / bc_mom05 logged for a later version.
+
 ---
 
 ## 8. Where the evidence is
