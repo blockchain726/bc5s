@@ -179,16 +179,37 @@ button.liveb.on{background:#b4232f;border-color:#b4232f}#msg{color:#f0b429;min-h
 <script>
 const q = location.search;
 const tokBox = document.getElementById('tok');
+const cleanTok = v => (v || '').trim().replace(/^API_TOKEN *= */i, '').replace(/^["']|["']$/g, '').trim();
 tokBox.value = localStorage.apiToken || '';
-tokBox.onchange = () => { localStorage.apiToken = tokBox.value.trim(); document.getElementById('msg').textContent = tokBox.value.trim() ? 'token saved in this browser' : 'token removed'; };
+function tokStatus(ok, text) {
+  let el = document.getElementById('tokst');
+  if (!el) { el = document.createElement('span'); el.id = 'tokst'; tokBox.after(el); }
+  el.innerHTML = ` <b style="color:${ok ? '#22d27a' : '#ff5468'}">${text}</b>`;
+}
+async function checkTok() {                       // an empty POST: accepted only with the right token, changes nothing
+  const tok = cleanTok(tokBox.value);
+  if (!tok) { tokStatus(false, 'no token'); return false; }
+  try {
+    const r = await fetch('/auto' + q, {method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok}, body: '{}'});
+    const ok = r.ok;
+    if (ok) localStorage.apiToken = tok;
+    tokStatus(ok, ok ? 'token OK' : 'token WRONG (copy the text after API_TOKEN= in .env)');
+    return ok;
+  } catch (e) { tokStatus(false, 'bot not reachable'); return false; }
+}
+tokBox.addEventListener('change', checkTok);
+tokBox.addEventListener('paste', () => setTimeout(checkTok, 50));
+if (tokBox.value) checkTok(); else tokStatus(false, '<- paste the token');
 async function post(body) {
   const headers = {'Content-Type': 'application/json'};
-  const tok = (localStorage.apiToken || tokBox.value || '').trim();
+  const tok = cleanTok(tokBox.value) || cleanTok(localStorage.apiToken);
   if (tok) headers['Authorization'] = 'Bearer ' + tok;
   const r = await fetch('/auto' + q, {method: 'POST', headers, body: JSON.stringify(body)});
   const d = await r.json();
-  document.getElementById('msg').textContent = d.error ? d.error + (r.status === 401 || r.status === 403 ? '  (paste the API_TOKEN from .env in the token box)' : '') : '';
+  const err = d.error ? d.error + (r.status === 401 || r.status === 403 ? '  (the token box: paste the text after API_TOKEN= in .env)' : '') : '';
+  const m = document.getElementById('msg'); m.textContent = err; m.style.color = err ? '#ff5468' : '';
   if (!d.error) state(d);
+  return {ok: !d.error, err, d};
 }
 const localDay = () => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`; };
 async function armClick() {
@@ -202,13 +223,16 @@ async function armClick() {
     `\nstops: ${d.max_real_run} losses in a row, the day's budget, the order count, the campaign limit, 4 h` +
     `\n\nthe gate is ${g.open ? 'OPEN' : 'CLOSED (no proven edge yet): your decision, logged'}.`;
   if (!confirm(txt)) return;
-  post({arm: true, ack_run: d.real_run, day: localDay(), force: true, ladder: lad});
+  const res = await post({arm: true, ack_run: d.real_run, day: localDay(), force: true, ladder: lad});
+  alert(res.ok ? `ARMED: real orders are ON (${res.d.ladder_on ? 'compensate ladder' : 'flat $' + (res.d.next_real_stake || 1)}).` :
+                 'NOT armed: ' + res.err);
 }
 async function resetClick() {
   let d; try { d = await (await fetch('/auto' + q)).json(); } catch (e) { return; }
   const reason = prompt(`Set the run of real losses (now ${d.real_run}) back to 0?\nSay why (it goes into the events log):`, 'new model');
   if (reason == null) return;
-  post({reset_run: true, ack_run: d.real_run, reason: 'dashboard: ' + reason});
+  const res = await post({reset_run: true, ack_run: d.real_run, reason: 'dashboard: ' + reason});
+  alert(res.ok ? 'Real losses in a row set to 0.' : 'NOT reset: ' + res.err);
 }
 document.querySelector('[data-arm]').onclick = armClick;
 document.querySelector('[data-reset]').onclick = resetClick;
