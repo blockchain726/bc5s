@@ -246,53 +246,44 @@ function every(hours, n) {
 function poolPay(stake) {     // page payout x1.94 after our stake joins a ~$102 side of a ~$204 pool
   return 1.94 * (204 + stake) / (102 + stake) * 102 / 204;
 }
-function runsBox(d) {
-  const runs = d.runs || {}, cur = runs[d.model] || {lengths: {}, current: 0, bets: 0};
-  const names = Object.keys(MODEL_NAMES).filter(k => runs[k]);
-  if (!names.length) return;
+const SHORT = {overshoot: 'Overshoot', overshoot_book: 'Oversh.+book', prob: 'P(UP)', ens: 'P(UP) ens.', gbm: 'P(UP) trees',
+  revert: 'Quiet rev.', mom: 'Momentum', book: 'Book', bookmom: 'Book+trend', momvol: 'Mom. volatile', sign: 'HawkesSign',
+  time: 'HawkesTime', mhh: 'MHH', mhh_hi: 'MHH conf.', agree: 'Sign+MHH', pool: 'Pool'};   // the order of the columns
+function runsBox(d) {                    // losing runs of every model, today only (since 00:00 local)
+  const runs = d.runs_today || {};
+  const names = Object.keys(SHORT).filter(k => runs[k] && runs[k].bets)
+    .sort((x, y) => (y === d.model) - (x === d.model));          // the calling model first
+  const box = document.getElementById('runs');
+  if (!names.length) { box.innerHTML = '<b>Losses in a row today</b> <span style="color:#8793a2">no settled calls yet today</span>'; return; }
   let maxN = 1;
   for (const k of names) {
     for (const n of Object.keys(runs[k].lengths)) maxN = Math.max(maxN, Number(n));
     maxN = Math.max(maxN, runs[k].current);
   }
-  const hours = Math.max(1e-6, (cur.last - cur.first) / 3600);
-  const atLeast = n => Object.entries(cur.lengths).reduce((s, [k, v]) => s + (Number(k) >= n ? v : 0), 0);
-  const th = s => `<th style="padding:2px 8px;text-align:right;font-weight:normal;color:#8793a2">${s}</th>`;
-  const td = (s, st = '') => `<td style="padding:2px 8px;text-align:right;${st}">${s}</td>`;
-  let rows = '', bet = 1, lost = 0, gaveUp = 0;
+  const th = (s, st = '') => `<th style="padding:3px 7px;text-align:right;font-weight:normal;color:#8793a2;white-space:nowrap;${st}">${s}</th>`;
+  const td = (s, st = '') => `<td style="padding:3px 7px;text-align:right;white-space:nowrap;${st}">${s}</td>`;
+  const me = k => k === d.model ? 'color:#5aa9ff;font-weight:bold' : '';
+  let rows = '';
   for (let n = 1; n <= maxN; n++) {
-    lost += bet; bet *= 2;                              // the x2 ladder through n losses (back to $1 only
-    if (d.ladder_cap && bet > d.ladder_cap) { bet = 1; gaveUp++; }   // if a paper give-up cap is set)
-    const net = bet * (poolPay(bet) - 1) - lost;
     rows += '<tr>' + td(n, 'color:#8793a2') + names.map(k => {
       const c = runs[k].lengths[n] || 0, now = runs[k].current === n;
-      return td(c + (now ? ' <span style="color:#f59e0b">+now</span>' : ''),
-                k === d.model ? 'color:#5aa9ff;font-weight:bold' : '');
-    }).join('') + td(every(hours, atLeast(n)), 'color:#5aa9ff') +
-      td('$' + bet + (gaveUp ? ` <span style="color:#8793a2">(gave up ${gaveUp === 1 ? 'once' : gaveUp + 'x'})</span>` : '')) +
-      td('-$' + lost, 'color:#ff5468') +
-      td((net >= 0 ? '+' : '') + net.toFixed(2), `color:${net >= 0 ? '#22d27a' : '#ff5468'}`) + '</tr>';
+      return td((c || (now ? '' : '·')) + (now ? ' <span style="color:#f59e0b">+now</span>' : ''),
+                (n >= 5 && (c || now) ? 'color:#ff5468;' : c ? '' : 'color:#3a4350;') + me(k));
+    }).join('') + '</tr>';
   }
-  const longest = Math.max(0, ...Object.keys(cur.lengths).map(Number), cur.current);
-  const lad = (d.ladders || {})[d.model] || {};
-  document.getElementById('runs').innerHTML =
-    `<b>Losses in a row</b> <span style="color:#8793a2">(how many runs of each length, all logged rounds; ` +
-    `a run ends at the next win)</span>` +
-    `<table style="border-collapse:collapse;margin-top:6px;font-size:13px"><tr>${th('losses in a row')}` +
-    names.map(k => th(MODEL_NAMES[k] + (k === d.model ? ' &#9664;' : ''))).join('') +
-    th(`${MODEL_NAMES[d.model] || d.model}: that many or more`) + th('x2: bet after them') +
-    th('x2: lost so far') + th('x2: net when it then wins') + `</tr>${rows}</table>` +
-    `<div style="margin-top:6px;color:#8793a2">${MODEL_NAMES[d.model] || d.model}: ${cur.bets} bets over ` +
-    `${hours.toFixed(1)} h &middot; longest run ${longest} &middot; now ${cur.current} in a row. ` +
-    `x2 net assumes ~$102 on each side of the pool, so a big bet pays itself back: x1.94 becomes ~x1.7 at $32. ` +
-    (d.ladder_cap ? `The paper x2 ladder gives up after losing the $${2 ** Math.floor(Math.log2(d.ladder_cap))} bet.`
-                  : `The paper x2 ladder never gives up: it doubles until a win. Real orders are always flat ` +
-                    `$${d.next_stake || 1} and stop at ${d.max_real_run} losses in a row.`) + `</div>` +
-    (d.progression === 2 && lad.staked ? `<div style="margin-top:4px">paper x2 since ` +
-      `${new Date(d.since * 1000).toLocaleTimeString()}: <b style="color:${lad.pnl >= 0 ? '#22d27a' : '#ff5468'}">` +
-      `${lad.pnl >= 0 ? '+' : ''}${lad.pnl.toFixed(2)}</b> pool-adjusted ` +
-      `<span style="color:#8793a2">(at page payouts ${(lad.pnl_shown || 0) >= 0 ? '+' : ''}${(lad.pnl_shown || 0).toFixed(2)}, ` +
-      `as MHH counts it) &middot; biggest bet $${lad.biggest} &middot; gave up ${lad.gave_up || 0}</span></div>` : '');
+  const longest = k => Math.max(0, ...Object.keys(runs[k].lengths).map(Number), runs[k].current);
+  const foot = (label, f, st) => '<tr style="border-top:1px solid #2c3440">' + td(label, 'color:#8793a2;text-align:left') +
+    names.map(k => td(f(k), (st ? st(k) : '') + me(k))).join('') + '</tr>';
+  box.innerHTML =
+    `<b>Losses in a row today</b> <span style="color:#8793a2">(since 00:00; how many losing runs of each length; ` +
+    `a run ends at the next win; red = 5 or more, the real-money stop)</span>` +
+    `<div style="overflow-x:auto"><table style="border-collapse:collapse;margin-top:6px;font-size:13px">` +
+    `<tr>${th('in a row', 'text-align:left')}${names.map(k => th(SHORT[k] + (k === d.model ? ' &#9664;' : ''), me(k))).join('')}</tr>` +
+    rows +
+    foot('calls', k => runs[k].bets) +
+    foot('longest', k => longest(k), k => longest(k) >= 5 ? 'color:#ff5468;' : '') +
+    foot('now', k => runs[k].current, k => runs[k].current ? 'color:#f59e0b;' : '') +
+    `</table></div>`;
 }
 function safetyLine(d) {
   const g = d.gate || {}, clk = d.clock || {};

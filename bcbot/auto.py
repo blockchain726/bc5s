@@ -362,6 +362,8 @@ class AutoTrader:
         self.clock = BcClock()                            # bc.game's clock, from those ticks (clock.py)
         self.pools: dict = {}                             # latest Up / Down pool frame
         self.runs: dict = {}                              # per model: its losing runs by length (see _run_step)
+        self.runs_today: dict = {}                        # the same, only rounds since local midnight
+        self._runs_day0 = 0.0
         # our estimate of bc.game's price: a weighted, delayed mix of exchange prices (ourprice.py)
         self.ex_feeds = make_feeds()
         self.our = OurPrice(self.ex_feeds, self.bc_ticks)
@@ -1533,8 +1535,19 @@ class AutoTrader:
             lad["gave_up"] = lad.get("gave_up", 0) + 1
 
     def _run_step(self, name: str, won: bool, t: float) -> None:
-        """Losing runs of one model: how many runs of each length (a run ends at the next win), and the current one."""
-        r = self.runs.setdefault(name, {"lengths": {}, "current": 0, "bets": 0, "first": t, "last": t})
+        """Losing runs of one model: how many runs of each length (a run ends at the next win), and the current one.
+        Kept twice: over all logged rounds (runs) and over today's rounds only (runs_today, reset at midnight)."""
+        lt = time.localtime()
+        day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        if day0 != self._runs_day0:
+            self.runs_today, self._runs_day0 = {}, day0
+        self._run_into(self.runs, name, won, t)
+        if t >= day0:
+            self._run_into(self.runs_today, name, won, t)
+
+    @staticmethod
+    def _run_into(table: dict, name: str, won: bool, t: float) -> None:
+        r = table.setdefault(name, {"lengths": {}, "current": 0, "bets": 0, "first": t, "last": t})
         r["bets"] += 1
         r["last"] = t
         if won:
@@ -2077,6 +2090,7 @@ class AutoTrader:
             "model": self.model,
             # each model's losing runs over all logged rounds: {"lengths": {run length: how many}, "current", ...}
             "runs": self.runs,
+            "runs_today": self.runs_today,
             "feed": {"connected": self.feed.connected, "msgs": self.feed.msgs, "data_s": round(self.pred.data_span()),
                      "events": len(self.feed.ev_time), "mid": self.feed.mid},
             "models_ready": self.pred.ready, "models": self.pred.info,

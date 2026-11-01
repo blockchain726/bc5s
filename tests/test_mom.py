@@ -68,3 +68,20 @@ def test_overshoot_rules():
     # with the book: any market, book against the move
     assert _overshoot_call({"bc_mom2": 1.0, "dev_tick": 1.5, "vol60": 3.0, "obi20": -0.6}, with_book=True) == "DOWN"
     assert _overshoot_call({"bc_mom2": 1.0, "dev_tick": 1.5, "vol60": 3.0, "obi20": 0.6}, with_book=True) is None
+
+
+def test_runs_today_counts_only_rounds_since_midnight(tmp_path):
+    import time
+    from tests.test_safety import make_cfg, FakeTrader
+    from bcbot.auto import AutoTrader
+    a = AutoTrader(FakeTrader(), make_cfg(tmp_path))
+    now = time.time()
+    lt = time.localtime(now)
+    day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    for won in (False, False, False, True):              # yesterday: a run of 3
+        a._run_step("overshoot", won, day0 - 3600)
+    for won in (False, True, False, False):              # today: a run of 1, then 2 still running
+        a._run_step("overshoot", won, day0 + 60)
+    assert a.runs["overshoot"]["lengths"] == {3: 1, 1: 1} and a.runs["overshoot"]["current"] == 2
+    td = a.runs_today["overshoot"]
+    assert td["lengths"] == {1: 1} and td["current"] == 2 and td["bets"] == 4
