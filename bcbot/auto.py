@@ -70,6 +70,74 @@ OVERLAY_JS = r"""
   if (p) p.scrollTop = y;
 }
 """
+CURVE_JS = r"""
+(d) => {                                             // our price curve on bc.game's own chart (the visx SVG):
+  let st = window.__hawkesCurve;                     // a fixed canvas over the SVG, redrawn 10x a second
+  if (!st || !st.host.isConnected) {
+    if (st && st.timer) clearInterval(st.timer);
+    const host = document.createElement('div');
+    host.id = 'hawkes-curve';
+    host.attachShadow({mode: 'open'});
+    host.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:2147483646;pointer-events:none;';
+    const cv = document.createElement('canvas');
+    cv.style.cssText = 'position:fixed;left:0;top:0;pointer-events:none;display:none';
+    host.shadowRoot.appendChild(cv);
+    document.body.appendChild(host);
+    st = window.__hawkesCurve = {host, cv, d: null, at: 0, draw: null};
+    st.timer = setInterval(() => { try { st.draw && st.draw(); } catch (e) {} }, 100);
+  }
+  st.d = d; st.at = performance.now();
+  st.draw = () => {
+    const cv = st.cv, d = st.d;
+    const svg = [...document.querySelectorAll('svg')].find(s => {
+      const r = s.getBoundingClientRect(); return r.width > 500 && r.height > 150 && s.querySelector('path.visx-linepath'); });
+    if (!d || !d.on || !svg || performance.now() - st.at > 5000) { cv.style.display = 'none'; return; }
+    const r = svg.getBoundingClientRect();
+    // price -> y: a straight line through the chart's own axis labels
+    const ticks = [...svg.querySelectorAll('.visx-axis-tick')].map(g => {
+      const l = g.querySelector('line'), t = g.querySelector('text');
+      return l && t ? [parseFloat(t.textContent.replace(/[^\d.\-]/g, '')), +l.getAttribute('y1')] : null;
+    }).filter(x => x && isFinite(x[0]) && isFinite(x[1]));
+    if (ticks.length < 2) { cv.style.display = 'none'; return; }
+    let n = ticks.length, sp = 0, sy = 0, spp = 0, spy = 0;
+    for (const [pp, yy] of ticks) { sp += pp; sy += yy; spp += pp * pp; spy += pp * yy; }
+    const b = (n * spy - sp * sy) / (n * spp - sp * sp), a = (sy - b * sp) / n;
+    if (!isFinite(a) || !isFinite(b) || !b) { cv.style.display = 'none'; return; }
+    const Y = pp => a + b * pp;
+    // time -> x: the chart shows 60 s before its last tick and 30 s after it; the last tick is the line's end
+    const nums = (svg.querySelector('path.visx-linepath').getAttribute('d').match(/-?\d+(\.\d+)?/g) || []).map(Number);
+    const xNow = nums.length >= 2 ? nums[nums.length - 2] : r.width * 2 / 3;
+    const pNow = nums.length >= 2 ? (nums[nums.length - 1] - a) / b : null;
+    let tLast = d.t_last;                            // which of the bot's ticks is the chart's last one: same price
+    if (pNow != null) for (let i = d.ticks.length - 1; i >= 0; i--) {
+      if (Math.abs(d.ticks[i][1] - pNow) < 0.002) { tLast = d.ticks[i][0]; break; } }
+    const pxs = r.width / 90, X = t => xNow + (t - tLast) * pxs;
+    const dpr = window.devicePixelRatio || 1;
+    cv.style.display = 'block'; cv.style.left = r.left + 'px'; cv.style.top = r.top + 'px';
+    cv.style.width = r.width + 'px'; cv.style.height = r.height + 'px';
+    if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) {
+      cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); }
+    const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, r.width, r.height);
+    const pts = (d.our || []).filter(q => q[0] >= tLast - 61 && q[0] <= tLast + 0.6).map(q => [X(q[0]), Y(q[1])]);
+    if (pts.length < 2) return;
+    for (const [w, c] of [[4, 'rgba(0,0,0,0.55)'], [1.7, '#22d3ee']]) {
+      g.strokeStyle = c; g.lineWidth = w; g.lineJoin = 'round'; g.beginPath();
+      pts.forEach((q, i) => i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); g.stroke(); }
+    const last = pts[pts.length - 1], pOur = d.our[d.our.length - 1][1];
+    g.fillStyle = '#22d3ee'; g.beginPath(); g.arc(last[0], last[1], 3, 0, 7); g.fill();
+    g.font = 'bold 12px Consolas, monospace'; g.textAlign = 'right';
+    const txt = 'our ' + pOur.toFixed(2) + (pNow != null ? '  (bc ' + (pNow - pOur >= 0 ? '+' : '') + (pNow - pOur).toFixed(2) + ')' : '');
+    const tw = g.measureText(txt).width, ly = Math.min(r.height - 8, Math.max(14, last[1] + (last[1] < r.height / 2 ? 18 : -10)));
+    g.fillStyle = 'rgba(11,14,19,0.8)'; g.fillRect(last[0] - 10 - tw - 4, ly - 11, tw + 8, 15);
+    g.fillStyle = '#22d3ee'; g.fillText(txt, last[0] - 10, ly);
+    g.textAlign = 'left'; g.font = '11px Consolas, monospace';
+    g.fillStyle = 'rgba(11,14,19,0.8)'; g.fillRect(r.width * 0.3, r.height - 22, 318, 16);   // bottom, clear of the icons
+    g.fillStyle = '#22d3ee'; g.fillText('— our price: 6-exchange mix, read 0.15 s earlier, at bc.game\'s level', r.width * 0.3 + 4, r.height - 10);
+  };
+  st.draw();
+}
+"""
+
 PANEL_CSS = """<style>
 .p{width:230px;font:11px/1.4 Consolas,monospace;color:#d6dde6;max-height:calc(100vh - 76px);overflow-y:auto;
    display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#3a4350 transparent}
@@ -706,6 +774,11 @@ class AutoTrader:
             if n % 5 == 0:
                 try:                                # the panel is re-created after any page reload
                     await self.trader.page.evaluate(OVERLAY_JS, self.panel_html())
+                except Exception:
+                    pass
+            if n % 2 == 0 and self.cfg.auto_page_curve:
+                try:                                # our price curve on bc.game's own chart
+                    await self.trader.page.evaluate(CURVE_JS, self.curve_data())
                 except Exception:
                     pass
 
@@ -1847,6 +1920,14 @@ class AutoTrader:
             + row("our price wrong", f"{(mix_n - mix_ok) / mix_n:.1%} of {mix_n}" if mix_n else "&ndash;") + '</div>')
         return (f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; ROUND #{rid or "&ndash;"}</span>{mode}</div>'
                 f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{models_card}</div>')
+
+    def curve_data(self) -> dict:
+        """What the page needs to draw our price on bc.game's chart: our last 75 s, the last ticks (the page finds
+        the chart's last tick among them by price), and the time of the newest tick."""
+        now = self.bc_now()
+        ticks = [[t, p] for t, p in list(self.bc_ticks)[-40:]]
+        return {"on": True, "our": self.our.series(now - 75, now), "ticks": ticks,
+                "t_last": ticks[-1][0] if ticks else now}
 
     def prices(self, window: float = 60.0, exchanges: bool = False) -> dict:
         """The last `window` seconds of bc.game's BTC price and of our price (the weighted, delayed exchange mix),

@@ -59,6 +59,7 @@ class Config:
     auto_max_lead_s: float
     auto_late_snapshot_s: float  # the second feature snapshot (paper research), this long before the cutoff
     auto_shadow: bool            # run every real-order check on paper and log what the bot would have done
+    auto_page_curve: bool        # draw our price curve on bc.game's own Up/Down chart
     auto_state_file: Path        # the real-loss counter and campaign, kept across restarts
     auto_events: Path            # audit trail of every arm / stop / order
     auto_kill_file: Path         # create this file to disarm at once (deleting it does not re-arm)
@@ -122,6 +123,7 @@ def load() -> Config:
         auto_max_lead_s=float(os.getenv("AUTO_MAX_LEAD_S", "5")),
         auto_late_snapshot_s=float(os.getenv("AUTO_LATE_SNAPSHOT_S", "1.4")),
         auto_shadow=_flag("AUTO_SHADOW", "1"),
+        auto_page_curve=_flag("AUTO_PAGE_CURVE", "1"),
         auto_state_file=_path("AUTO_STATE_FILE", "logs/live_state.json"),
         auto_events=_path("AUTO_EVENTS", "logs/live_events.jsonl"),
         auto_kill_file=_path("AUTO_KILL_FILE", "logs/KILL"),
