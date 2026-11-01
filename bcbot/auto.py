@@ -1848,9 +1848,10 @@ class AutoTrader:
         return (f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; ROUND #{rid or "&ndash;"}</span>{mode}</div>'
                 f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{models_card}</div>')
 
-    def prices(self, window: float = 60.0) -> dict:
+    def prices(self, window: float = 60.0, exchanges: bool = False) -> dict:
         """The last `window` seconds of bc.game's BTC price and of our price (the weighted, delayed exchange mix),
-        the rounds in view with their results, and how often our price got the Up/Down wrong."""
+        the rounds in view with their results, and how often our price got the Up/Down wrong.  With `exchanges`
+        also each exchange's own curve (delayed and moved to bc.game's level, as the mix uses it)."""
         now = self.bc_now()                           # bc.game's clock (from its ticks); this PC's clock may be off
         cut = now - window
 
@@ -1862,6 +1863,7 @@ class AutoTrader:
             "now": now,
             "bc": last(self.bc_ticks),
             "our": self.our.series(cut, now),         # our price: the weighted, delayed exchange mix (ourprice.py)
+            "exchanges": self.our.exchange_series(cut, now) if exchanges else None,
             "mix": {k: {"label": self.ex_feeds[k].name, "weight": w, "lag": lag,
                         "gap": round(self.our.gaps().get(k, float("nan")), 2), "live": bool(self.ex_feeds[k].connected)}
                     for k, (w, lag) in MIX.items()},

@@ -121,6 +121,8 @@ curl -X POST http://127.0.0.1:8765/trade -H "Content-Type: application/json" -d 
 
 Auto mode: `GET /auto` gives the accuracy, paper P&L, last call, model parameters and the real-money state (run of losses, budget, clock, gate, last events). `POST /auto` with `{"on": true}`, `{"model": "mhh"}` or `{"progression": 1.5}` changes the paper settings; `{"arm": true, "ack_run": 0, "day": "2026-10-30"}`, `{"live": false}`, `{"kill": true}` and `{"clear": "unknown", "outcome": "none"}` arm, disarm, kill and clear, and need the token.
 
+The dashboard at http://127.0.0.1:8765/ draws bc.game's price (yellow) and our price (cyan) on one chart, with each round's window and result, and the bc.game-minus-ours strip under it. The window selector gives 60 s, 2 min or 5 min; "show the 6 exchanges" adds each exchange's own curve as the mix uses it (delayed 0.15 s and moved to bc.game's level), so you can see which exchange moves our price and which one lags. `GET /auto/prices?s=120&ex=1` returns the same data.
+
 A successful trade returns `{"ok": true, "order_id": ..., "round_id": ..., ...}`. A failure returns `{"ok": false, "error": "..."}`.
 `POST /trade` and everything that arms or disarms require `API_TOKEN` from `.env` (`Authorization: Bearer <token>` or `?token=`); without one they are refused.
 

@@ -107,7 +107,7 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
 
     async def prices(request: web.Request) -> web.Response:
         window = min(300.0, max(10.0, float(request.query.get("s", 60))))
-        return web.json_response(auto.prices(window))
+        return web.json_response(auto.prices(window, exchanges=request.query.get("ex") == "1"))
 
     async def dashboard(_: web.Request) -> web.Response:
         return web.Response(text=DASHBOARD, content_type="text/html")
@@ -152,9 +152,12 @@ button.liveb.on{background:#b4232f;border-color:#b4232f}#msg{color:#f0b429;min-h
 <div id="msg"></div>
 <div style="width:min(1100px,100%)">
   <div style="display:flex;justify-content:space-between;color:#8793a2;margin-bottom:4px">
-    <span>BTC price, last 60 s &middot; <span style="color:#facc15">bc.game</span> vs <span style="color:#22d3ee">our price</span>
+    <span>BTC price, last <select id="win" style="font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:4px">
+      <option value="60">60 s</option><option value="120">2 min</option><option value="300">5 min</option></select>
+      &middot; <span style="color:#facc15">bc.game</span> vs <span style="color:#22d3ee">our price</span>
       = weighted mix of 6 exchange prices (mostly perpetual futures), each read ~0.15 s earlier (bc.game follows
-      them) and moved to bc.game's level</span>
+      them) and moved to bc.game's level &middot;
+      <label title="each exchange's own price as the mix uses it: delayed and moved to bc.game's level"><input type="checkbox" id="showex"> show the 6 exchanges</label></span>
     <span id="mixinfo"></span></div>
   <canvas id="chart" style="width:100%;height:300px;background:#11141a;border:1px solid #2c3440;border-radius:8px"></canvas>
   <div style="color:#8793a2;margin:6px 0 2px">difference: bc.game minus our price ($)</div>
@@ -269,18 +272,26 @@ function ourPrice(d) {
   const line = d.our || [];
   return {line, at: t => priceAt(line, t)};
 }
+const EX_COLORS = {bitfinex_perp: '#c084fc', bybit_perp: '#f472b6', okx_perp: '#fb923c', okx: '#a3e635',
+                   binance_perp: '#60a5fa', coinbase: '#94a3b8'};
+const winSel = document.getElementById('win'), showEx = document.getElementById('showex');
+winSel.value = localStorage.chartWin || '60'; showEx.checked = localStorage.chartEx === '1';
+winSel.onchange = () => { localStorage.chartWin = winSel.value; drawChart(); };
+showEx.onchange = () => { localStorage.chartEx = showEx.checked ? '1' : '0'; drawChart(); };
 async function drawChart() {
-  let d; try { d = await (await fetch('/auto/prices?s=60' + (q ? '&' + q.slice(1) : ''))).json(); } catch (e) { return; }
+  const win = Number(winSel.value) || 60, ex = showEx.checked;
+  let d; try { d = await (await fetch(`/auto/prices?s=${win}&ex=${ex ? 1 : 0}` + (q ? '&' + q.slice(1) : ''))).json(); } catch (e) { return; }
   const cv = document.getElementById('chart'), dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * dpr; cv.height = H * dpr;
   const g = cv.getContext('2d'); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
-  const L = 70, R = 12, T = 12, B = 22, x1 = d.now, x0 = x1 - 60;
-  const bc = d.bc || [], our = ourPrice(d);
-  const lines = [{pts: our.line, color: '#22d3ee', w: 1.6}, {pts: bc, color: '#facc15', w: 2.2}];
+  const L = 70, R = 12, T = 12, B = 22, x1 = d.now, x0 = x1 - win;
+  const bc = d.bc || [], our = ourPrice(d), exs = (ex && d.exchanges) || {};
+  const lines = Object.entries(exs).map(([k, pts]) => ({pts, color: EX_COLORS[k] || '#8793a2', w: 0.9, dash: [3, 2]}))
+    .concat([{pts: our.line, color: '#22d3ee', w: 1.6}, {pts: bc, color: '#facc15', w: 2.2}]);
   // how different: bc.game minus our price at each bc.game tick, and 1 s moves in the same direction
   const diffs = bc.map(p => { const o = our.at(p[0]); return o == null ? null : [p[0], p[1] - o]; }).filter(x => x);
   let same = 0, moves = 0;
-  for (let t = x1 - 59; t <= x1; t += 1) {
+  for (let t = x1 - win + 1; t <= x1; t += 1) {
     const b0 = priceAt(bc, t - 1), b1 = priceAt(bc, t), o0 = our.at(t - 1), o1 = our.at(t);
     if ([b0, b1, o0, o1].includes(null) || b1 === b0 || o1 === o0) continue;
     moves++; same += Math.sign(b1 - b0) === Math.sign(o1 - o0);
@@ -294,7 +305,9 @@ async function drawChart() {
     `<span>now ${diffs.length ? (diffs[diffs.length - 1][1] >= 0 ? '+' : '') + f(diffs[diffs.length - 1][1]) : '–'}</span>`,
     `<span>average |difference| ${f(mean(absd))} &middot; max ${absd.length ? f(Math.max(...absd)) : '–'}</span>`,
     `<span>1 s moves in the same direction ${moves ? Math.round(100 * same / moves) + '%' : '–'} (${moves})</span>`,
-  ].join('');
+  ].concat(Object.keys(exs).map(k => { const m = (d.mix || {})[k] || {}, p = exs[k];
+    return `<span style="color:${EX_COLORS[k] || '#8793a2'}">&#8230; ${m.label || k} ${p.length ? f(p[p.length - 1][1]) : '–'} ` +
+      `<span style="color:#8793a2">(${Math.round(100 * (m.weight || 0))}%, level ${m.gap >= 0 ? '+' : ''}${f(m.gap)})</span></span>`; })).join('');
   document.getElementById('mixinfo').innerHTML = Object.entries(d.mix || {}).map(([k, m]) =>
     `<span style="color:${m.live ? '#8793a2' : '#ff5468'}">${m.label || k} ${Math.round(100 * m.weight)}%</span>`).join(' &middot; ');
   drawDiff(diffs, x0, x1);
@@ -317,7 +330,8 @@ async function drawChart() {
   g.font = '11px Consolas, monospace'; g.fillStyle = '#8793a2'; g.strokeStyle = '#1f2630'; g.lineWidth = 1;
   for (let i = 0; i <= 4; i++) { const v = y0 + (y1 - y0) * i / 4, y = Y(v);
     g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.fillText(v.toFixed(1), 4, y + 4); }
-  for (let s = 0; s <= 60; s += 10) { const x = X(x1 - s); g.fillText(s ? `-${s}s` : 'now', x - 12, H - 6); }
+  const tick = win >= 300 ? 60 : win >= 120 ? 20 : 10;
+  for (let s = 0; s <= win; s += tick) { const x = X(x1 - s); g.fillText(s ? `-${s}s` : 'now', x - 12, H - 6); }
   for (const rd of (d.rounds || [])) {               // each round's 5 s window: gray while running,
     if (!rd.start || !rd.end || rd.end < x0) continue; // then green (UP) / red (DOWN) with a line at its end
     const rgb = rd.tie ? '148,163,184' : rd.win === 'UP' ? '34,210,122' : rd.win === 'DOWN' ? '255,84,104' : null;
@@ -344,11 +358,11 @@ async function drawChart() {
   if (r.start_price) { const y = Y(r.start_price); g.strokeStyle = 'rgba(250,204,21,0.6)'; g.setLineDash([6, 4]);
     g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.setLineDash([]);
     g.fillStyle = '#facc15'; g.fillText('start ' + r.start_price.toFixed(2), L + 4, y - 4); }
-  for (const l of lines) {                           // our price first, bc.game on top
+  for (const l of lines) {                           // the exchanges (if shown), then our price, bc.game on top
     const pts = l.pts.filter(p => p[0] >= x0 - 2); if (pts.length < 2) continue;
-    g.strokeStyle = l.color; g.lineWidth = l.w; g.beginPath();
+    g.strokeStyle = l.color; g.lineWidth = l.w; g.setLineDash(l.dash || []); g.beginPath();
     pts.forEach((p, i) => { const x = Math.max(L, X(p[0])), y = Y(p[1]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
-    g.lineTo(X(x1), Y(pts[pts.length - 1][1])); g.stroke();
+    g.lineTo(X(x1), Y(pts[pts.length - 1][1])); g.stroke(); g.setLineDash([]);
   }
 }
 function drawDiff(diffs, x0, x1) {                    // bars: bc.game minus our price, at each bc.game tick

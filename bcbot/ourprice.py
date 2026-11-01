@@ -311,3 +311,21 @@ class OurPrice:
                 out.append([round(t, 2), round(v, 3)])
             t += step
         return out
+
+    def exchange_series(self, t0: float, t1: float, step: float = 0.2) -> dict:
+        """Each exchange's own curve as the mix sees it (delayed by its lag, moved to bc.game's level by its gap),
+        for the chart: exchange name -> [[server time, price]].  Shows which exchange moves our price."""
+        snap = self._snapshot()
+        gaps = self.gaps(snap)
+        out = {}
+        for k, (w, lag) in MIX.items():
+            if k not in gaps:
+                continue
+            pts, t = [], t0
+            while t <= t1:
+                v = self._price(snap, k, lag, t)
+                if v is not None:
+                    pts.append([round(t, 2), round(v - gaps[k], 3)])
+                t += step
+            out[k] = pts
+        return out
