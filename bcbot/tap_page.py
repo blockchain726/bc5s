@@ -1,0 +1,154 @@
+"""The Tap analyzer's page (GET /tap on the local API; data from GET /tap/state)."""
+
+TAP_DASHBOARD = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>BC bot · Tap</title>
+<style>
+body{margin:0;padding:16px;background:#0b0e13;font:13px Consolas,monospace;color:#d6dde6}
+a{color:#5aa9ff;text-decoration:none}.mute{color:#8793a2}.up{color:#22d27a}.down{color:#ff5468}.warn{color:#facc15}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px}
+.title{font-weight:700;letter-spacing:.6px}.tag{padding:1px 7px;border-radius:4px;background:#2c3440;font-weight:700}
+.wrap{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:14px}
+@media (max-width:1100px){.wrap{grid-template-columns:1fr}}
+.c{background:#11141a;border:1px solid #2c3440;border-radius:9px;padding:10px 12px;margin-bottom:14px}
+.ct{display:flex;justify-content:space-between;font-weight:700;font-size:12px;letter-spacing:.6px;margin-bottom:6px}
+table{border-collapse:collapse;width:100%}th,td{padding:3px 6px;text-align:right;white-space:nowrap}
+th{color:#8793a2;font-weight:normal}td.l,th.l{text-align:left}
+.grid td{text-align:center;border:1px solid #1b2029;padding:4px 2px;line-height:1.15}
+.grid td.px{text-align:right;color:#8793a2;border:none;padding-right:8px}.grid .now td.px{color:#facc15}
+.grid .cell b{display:block;font-size:13px}.grid .cell span{font-size:10px}
+.grid .off{opacity:.45}.grid .pick{outline:2px solid #facc15;outline-offset:-2px}
+.big{font:700 22px Consolas,monospace}.row{display:flex;justify-content:space-between;gap:8px}
+.res{display:flex;gap:8px;align-items:center;padding:3px 7px;border-radius:5px;margin-top:3px;font-weight:700}
+.res.w{background:rgba(34,210,122,.16);color:#22d27a}.res.l{background:rgba(255,84,104,.16);color:#ff5468}
+.res .m{margin-left:auto}.note{color:#8793a2;font-size:11px;margin-top:6px;line-height:1.4}
+</style></head><body>
+<div class="top">
+  <div><a href="/">&larr; Up/Down dashboard</a></div>
+  <div class="title">TAP ANALYZER &middot; <span id="sym">BTC/USD</span> <span class="tag">PAPER ONLY &middot; no orders</span></div>
+  <div id="status" class="mute"></div>
+</div>
+<div id="info" class="c"></div>
+<div class="wrap">
+  <div>
+    <div class="c"><div class="ct"><span>THE GRID NOW</span><span class="mute">bc.game's multiplier &middot; our EV
+      (green = our EV above 1) &middot; yellow box = paper tap</span></div>
+      <table class="grid" id="grid"></table>
+      <div class="note">Rows: price bands ($10). Columns: the 2 s windows starting next; dimmed ones can't be tapped now.
+      A tap wins if the price touches its band inside its window. Multiplier = bc.game's model (0.97 / its P(hit),
+      max &times;8). EV = our P(hit), from the price's real recent volatility, &times; the multiplier.</div></div>
+    <div class="c"><div class="ct"><span>EVERY CELL TAPPED VIRTUALLY</span><span class="mute">real return per $1
+      &middot; settled on the real price</span></div>
+      <table id="cells"></table>
+      <div class="note">Each column, every cell is "tapped" on paper at bc.game's multiplier and settled when its
+      window ends: return = (hits &times; multiplier) / taps &minus; 1. Green = that kind of cell paid more than it cost.
+      Rows: bands above (+) / below (&minus;) the price's band; columns: how many windows ahead.</div></div>
+  </div>
+  <div>
+    <div class="c" id="paper"></div>
+    <div class="c"><div class="ct"><span>DOES OUR EV PREDICT IT?</span><span class="mute">virtual taps by our EV</span></div>
+      <table id="ev"></table></div>
+    <div class="c" id="public"></div>
+  </div>
+</div>
+<script>
+const q = location.search;
+const pct = (v, d = 1) => v == null || isNaN(v) ? '–' : (100 * v).toFixed(d) + '%';
+const sgn = (v, d = 1) => v == null || isNaN(v) ? '–' : (v >= 0 ? '+' : '') + (100 * v).toFixed(d) + '%';
+const usd = v => v == null ? '–' : (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2);
+const tm = ms => new Date(ms).toLocaleTimeString('en-GB');
+function shade(ret, n) {             // green for a positive return, red for negative; faint when few samples
+  if (!n) return '';
+  const a = Math.min(0.55, Math.abs(ret) * 1.2) * Math.min(1, n / 200) + 0.05;
+  return `background:rgba(${ret >= 0 ? '34,210,122' : '255,84,104'},${a.toFixed(2)})`;
+}
+function grid(g) {
+  const el = document.getElementById('grid');
+  if (!g || !g.cells) { el.innerHTML = '<tr><td class="mute">waiting for the first column…</td></tr>'; return; }
+  const ks = [...new Set(g.cells.map(c => c.k))].sort((a, b) => a - b);
+  const rs = [...new Set(g.cells.map(c => c.r))].sort((a, b) => b - a);
+  const at = {}; g.cells.forEach(c => at[c.k + ',' + c.r] = c);
+  let h = '<tr><td class="px"></td>' + ks.map(k => {
+    const c = at[k + ',0'];
+    return `<th>${tm(c.t0)}<br><span class="mute">${c.tappable ? 'tap' : '–'}</span></th>`;
+  }).join('') + '</tr>';
+  for (const r of rs) {
+    const c0 = at[ks[0] + ',' + r];
+    h += `<tr class="${r === 0 ? 'now' : ''}"><td class="px">${c0.lo.toFixed(0)}${r === 0 ? ' ◀' : ''}</td>` + ks.map(k => {
+      const c = at[k + ',' + r];
+      const pick = g.pick && g.pick[0] === k && g.pick[1] === r;
+      const bg = c.ev >= 1 ? `rgba(34,210,122,${Math.min(0.6, (c.ev - 1) * 2 + 0.12).toFixed(2)})`
+                           : `rgba(255,84,104,${Math.min(0.35, (1 - c.ev) * 0.5).toFixed(2)})`;
+      return `<td class="cell ${c.tappable ? '' : 'off'} ${pick ? 'pick' : ''}" style="background:${bg}">` +
+             `<b>×${c.odds.toFixed(2)}</b><span>EV ${c.ev.toFixed(2)}</span></td>`;
+    }).join('') + '</tr>';
+  }
+  el.innerHTML = h;
+}
+function cells(rows) {
+  const el = document.getElementById('cells');
+  const at = {}; rows.forEach(s => at[s.key] = s);
+  const ks = [0, 1, 2, 3, 4, 5], rs = [6, 5, 4, 3, 2, 1, 0, -1, -2, -3, -4, -5, -6];
+  let h = '<tr><th class="l">band</th>' + ks.map(k => `<th>+${k} col</th>`).join('') + '</tr>';
+  for (const r of rs) {
+    h += `<tr><td class="l mute">${r > 0 ? '+' + r : r}${r === 0 ? ' (price)' : ''}</td>` + ks.map(k => {
+      const s = at[k + ',' + r];
+      if (!s) return '<td class="mute">–</td>';
+      return `<td style="${shade(s.ret, s.n)}" title="${s.n} taps · hit ${pct(s.hit)} · avg ×${s.odds.toFixed(2)} · bc.game P ${pct(s.pm)} · ours ${pct(s.po)}">${sgn(s.ret, 0)}</td>`;
+    }).join('') + '</tr>';
+  }
+  const n = rows.reduce((a, s) => a + s.n, 0);
+  el.innerHTML = h + `<tr><td class="l mute" colspan="7">${n.toLocaleString()} virtual taps settled (hover a cell for details)</td></tr>`;
+}
+function ev(rows) {
+  const order = r => parseFloat(r.key);
+  rows.sort((a, b) => order(a) - order(b));
+  document.getElementById('ev').innerHTML = '<tr><th class="l">our EV</th><th>taps</th><th>hit</th><th>our P</th>' +
+    '<th>bc.game P</th><th>avg ×</th><th>real return</th></tr>' + rows.map(s =>
+    `<tr><td class="l">${s.key}</td><td>${s.n.toLocaleString()}</td><td>${pct(s.hit)}</td><td>${pct(s.po)}</td>` +
+    `<td>${pct(s.pm)}</td><td>×${s.odds.toFixed(2)}</td><td style="${shade(s.ret, s.n)}">${sgn(s.ret)}</td></tr>`).join('');
+}
+function paper(p) {
+  const wr = p.bets ? p.wins / p.bets : null;
+  document.getElementById('paper').innerHTML =
+    `<div class="ct"><span>PAPER TAPS</span><span class="mute">$1 on the best-EV tappable cell when EV &ge; ${p.ev_min}</span></div>` +
+    `<div class="row"><span class="mute">P&amp;L</span><span class="mute">taps &middot; won</span></div>` +
+    `<div class="row"><span class="big ${p.pnl >= 0 ? 'up' : 'down'}">${usd(p.pnl)}</span><span class="big">${p.bets} &middot; ${p.wins}</span></div>` +
+    `<div class="mute">won ${pct(wr)}${p.open ? ` &middot; open ${p.open} tap${p.open > 1 ? 's' : ''} ($${p.open} at risk, wallet view ${usd(p.pnl - p.open)})` : ''}</div>` +
+    (p.recent || []).slice(0, 8).map(r => `<div class="res ${r.hit ? 'w' : 'l'}"><span>+${r.k} col ${r.r >= 0 ? '+' : ''}${r.r} band</span>` +
+      `<span>×${r.odds.toFixed(2)}</span><span class="mute">EV ${r.ev.toFixed(2)}</span><b>${r.hit ? 'HIT' : 'MISS'}</b>` +
+      `<span class="m">${usd(r.pnl)}</span></div>`).join('');
+}
+function pub(p) {
+  const by = Object.entries(p.by_odds || {}).sort((a, b) => parseFloat(a[0]) - parseFloat(b[0]));
+  document.getElementById('public').innerHTML =
+    `<div class="ct"><span>OTHER PLAYERS' BTC/USD TAPS</span><span class="mute">from the page's live feed</span></div>` +
+    `<div class="row"><span class="mute">taps</span><span>${p.n}</span></div>` +
+    `<div class="row"><span class="mute">won</span><span>${pct(p.n ? p.won / p.n : null)}</span></div>` +
+    `<div class="row"><span class="mute">average multiplier</span><span>×${p.n ? (p.odds / p.n).toFixed(2) : '–'}</span></div>` +
+    `<div class="row"><span class="mute">players' return per $1</span><span>${sgn(p.n ? p.ret / p.n : null)}</span></div>` +
+    `<div class="row"><span class="mute">our hit rule agrees with their result</span><span>${pct(p.checked ? p.agree_tick / p.checked : null)} ` +
+    `<span class="mute">(cross rule ${pct(p.checked ? p.agree_cross / p.checked : null)}, ${p.checked})</span></span></div>` +
+    `<div class="row"><span class="mute">their multiplier vs our port</span><span>${p.odds_ratio ? sgn(p.odds_ratio - 1) : '–'}</span></div>` +
+    (by.length ? '<table style="margin-top:6px"><tr><th class="l">multiplier</th><th>taps</th><th>won</th><th>fair (0.97/×)</th></tr>' +
+      by.map(([k, b]) => `<tr><td class="l">${k}</td><td>${b.n}</td><td>${pct(b.won / b.n)}</td><td>${pct(0.97 / (b.odds / b.n))}</td></tr>`).join('') + '</table>' : '');
+}
+async function tick() {
+  let d; try { d = await (await fetch('/tap/state' + q)).json(); } catch (e) { document.getElementById('status').textContent = 'bot not reachable'; return; }
+  if (d.error) { document.getElementById('status').textContent = d.error; return; }
+  document.getElementById('status').innerHTML = (d.connected ? '<span class="up">● live</span>' : '<span class="down">● no price</span>') +
+    ` &middot; ${d.price ? d.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '–'}`;
+  const c = d.cfg || {};
+  const ratio = d.vol_real && d.vol_cfg ? d.vol_real / d.vol_cfg : null;
+  document.getElementById('info').innerHTML =
+    `bc.game's settings: <b>${c.timeIncrement} s</b> columns &middot; <b>$${c.priceIncrement}</b> rows &middot; max <b>×${c.maxOdds}</b> &middot; ` +
+    `its model's price step <b>$${d.vol_cfg_usd ? d.vol_cfg_usd.toFixed(2) : '–'}</b> per 0.5 s` +
+    `${d.cfg_from_page ? '' : ' <span class="warn">(defaults: page settings not read yet)</span>'}` +
+    (d.bc_read && d.bc_read.n ? ` &middot; multipliers <b class="up">read from bc.game's grid</b> (${d.bc_read.n} cells, $${d.step_inferred} bands on screen)`
+                              : ` &middot; multipliers <b class="warn">from our port</b> (grid not read: ${d.bc_read ? d.bc_read.err : '–'})`) +
+    ` &nbsp;|&nbsp; the real price (last 10 min): <b>$${d.vol_real_usd ? d.vol_real_usd.toFixed(2) : '–'}</b> per 0.5 s` +
+    (ratio ? ` = <b class="${ratio < 1 ? 'up' : 'down'}">${(100 * ratio).toFixed(0)}%</b> of bc.game's` : '') +
+    `<div class="note">Below 100%: the price moves less than bc.game's model assumes, so cells near the price get hit more often ` +
+    `than their multiplier prices in, far cells less often. Statistics since ${new Date(d.since * 1000).toLocaleString()}.</div>`;
+  grid(d.grid); cells(d.cells || []); ev(d.ev || []); paper(d.paper || {}); pub(d.public || {});
+}
+tick(); setInterval(tick, 1000);
+</script></body></html>"""
