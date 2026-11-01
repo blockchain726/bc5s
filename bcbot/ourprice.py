@@ -31,7 +31,9 @@ log = logging.getLogger(__name__)
 # ~0.15 s; the perpetual futures prices track it best.  bc.game moves ~10% more than the mix.
 MIX = {"bitfinex_perp": (0.433, 0.15), "bybit_perp": (0.172, 0.15), "okx_perp": (0.160, 0.15),
        "okx": (0.114, 0.15), "binance_perp": (0.068, 0.15), "coinbase": (0.053, 0.15)}
-MIX_VERSION = 2             # logged with each round's mix move, so the wrong-rate counts only this mix
+MIX_VERSION = 3             # logged with each round's mix move, so the wrong-rate counts only this mix
+                            # (3, 2026-11-01: Bitfinex read DEPTH_BTC deep instead of its top of book)
+DEPTH_BTC = 0.5             # Bitfinex: mid of the average prices to buy / sell this much (depth_mid)
 GAP_WINDOW = 60.0           # s of bc.game ticks used for each exchange's level gap
 STALE = 120.0               # these feeds only send when the price changes, so silence means "unchanged";
                             # for the CHART an exchange is left out only after this long without any update
@@ -155,18 +157,42 @@ def _coinbase(f, d):
                     f.put((float(t["best_bid"]) + float(t["best_ask"])) / 2)
 
 
+def depth_mid(book: dict, size: float = None, levels: int = 25):
+    """The mid of the average prices to buy and to sell `size` BTC through the best `levels` price levels.
+    None if a side is thinner than that.  Unlike the top-of-book mid it does not jump when one small order at the
+    top comes and goes."""
+    size = DEPTH_BTC if size is None else size
+    out = []
+    for side, best_first in (("b", True), ("a", False)):
+        left, cost = size, 0.0
+        for p in sorted(book[side], reverse=best_first)[:levels]:
+            take = min(left, book[side][p])
+            cost += take * p
+            left -= take
+            if left <= 1e-12:
+                break
+        if left > 1e-12:
+            return None
+        out.append(cost / size)
+    return (out[0] + out[1]) / 2
+
+
 def _bitfinex(f, d):
     if isinstance(d, dict) or len(d) < 2 or d[1] == "hb":
         return
+    snapshot = bool(d[1]) and isinstance(d[1][0], list)
+    if snapshot:                                  # a (re)subscription: start the book again
+        f._state["book"] = {"b": {}, "a": {}}
     book = f._state.setdefault("book", {"b": {}, "a": {}})
-    rows = d[1] if d[1] and isinstance(d[1][0], list) else [d[1]]
+    rows = d[1] if snapshot else [d[1]]
     for p, c, a in rows:
         if c == 0:
             (book["b"] if a == 1 else book["a"]).pop(p, None)
         else:
             (book["b"] if a > 0 else book["a"])[p] = abs(a)
     if book["b"] and book["a"]:
-        f.put((max(book["b"]) + min(book["a"])) / 2)
+        mid = depth_mid(book)
+        f.put(mid if mid is not None else (max(book["b"]) + min(book["a"])) / 2)
 
 
 def _okx_sub(inst):
@@ -174,7 +200,7 @@ def _okx_sub(inst):
 
 
 def _bitfinex_sub(sym):
-    return [{"event": "subscribe", "channel": "book", "symbol": sym, "prec": "P0", "freq": "F0", "len": "1"}]
+    return [{"event": "subscribe", "channel": "book", "symbol": sym, "prec": "P0", "freq": "F0", "len": "25"}]
 
 
 FEEDS = {   # name -> (label, websocket, subscribe messages, parser); "_perp" = USDT perpetual futures

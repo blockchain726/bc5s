@@ -145,7 +145,8 @@ CURVE_JS = r"""
     const last = pts[pts.length - 1], pOur = d.our[d.our.length - 1][1];
     g.fillStyle = '#22d3ee'; g.beginPath(); g.arc(last[0], last[1], 3, 0, 7); g.fill();
     g.font = 'bold 12px Consolas, monospace'; g.textAlign = 'right';
-    const txt = 'our ' + pOur.toFixed(2) + (pNow != null ? '  (bc ' + (pNow - pOur >= 0 ? '+' : '') + (pNow - pOur).toFixed(2) + ')' : '');
+    const pBc = d.ticks.length ? d.ticks[d.ticks.length - 1][1] : null;   // bc.game's exact last tick, not pixels
+    const txt = 'our ' + pOur.toFixed(2) + (pBc != null ? '  (bc ' + (pBc - pOur >= 0 ? '+' : '') + (pBc - pOur).toFixed(2) + ')' : '');
     const tw = g.measureText(txt).width, ly = Math.min(r.height - 8, Math.max(14, last[1] + (last[1] < r.height / 2 ? 18 : -10)));
     g.fillStyle = 'rgba(11,14,19,0.8)'; g.fillRect(last[0] - 70 - tw - 4, ly - 11, tw + 8, 15);
     g.fillStyle = '#22d3ee'; g.fillText(txt, last[0] - 70, ly);

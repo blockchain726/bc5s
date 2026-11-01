@@ -156,7 +156,7 @@ button.liveb.on{background:#b4232f;border-color:#b4232f}#msg{color:#f0b429;min-h
       <option value="60">60 s</option><option value="120">2 min</option><option value="300">5 min</option></select>
       &middot; <span style="color:#facc15">bc.game</span> vs <span style="color:#22d3ee">our price</span>
       = weighted mix of 6 exchange prices (mostly perpetual futures), each read ~0.15 s earlier (bc.game follows
-      them) and moved to bc.game's level &middot;
+      them) and moved to bc.game's level; Bitfinex is read 0.5 BTC deep in its book &middot;
       <label title="each exchange's own price as the mix uses it: delayed and moved to bc.game's level"><input type="checkbox" id="showex"> show the 6 exchanges</label></span>
     <span id="mixinfo"></span></div>
   <canvas id="chart" style="width:100%;height:300px;background:#11141a;border:1px solid #2c3440;border-radius:8px"></canvas>
