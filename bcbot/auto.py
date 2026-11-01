@@ -394,6 +394,7 @@ class AutoTrader:
         self.run_reset_at = 0.0            # 'live reset': real orders before this time don't count in the run
         self.armed_at = 0.0
         self.rearm_grant = False           # beyond the run limit: a re-arm allows exactly one real order
+        self.ladder_forced = False         # 'live arm ... ladder': the compensate ladder on although the gate is closed
         self.rearms = 0
         self.real_run = 0                  # real losses in a row; only a real WIN resets it, nothing else
         self.real_run_longest_today = 0
@@ -597,9 +598,11 @@ class AutoTrader:
                  f" ({self.stop_reason})" if self.stop_reason else "", self.real_run, self.attempts_today,
                  self.budget_left(), self.campaign_pnl, "" if self.cfg.live_allowed else " | LIVE_ALLOWED is not set")
 
-    def arm(self, ack_run: int, day: str, who: str = "operator", force: bool = False) -> str:
+    def arm(self, ack_run: int, day: str, who: str = "operator", force: bool = False, ladder: bool = False) -> str:
         """Allow real orders.  The command must name the current run of real losses and today's date, so nobody
-        re-arms without seeing the state they accept; beyond the run limit it allows exactly ONE real order."""
+        re-arms without seeing the state they accept; beyond the run limit it allows exactly ONE real order.
+        `ladder` (with `force`, while the gate is closed) switches the real compensate ladder on for this arming:
+        the operator's decision, logged; it ends with the arming (a stop, a disarm or the time limit)."""
         c = self.cfg
         if not self.on:
             raise TradeError("Turn auto on first")
@@ -632,17 +635,23 @@ class AutoTrader:
         gate = self.gate_status()
         if not gate["open"] and not force:
             raise TradeError(f"the gate is closed: {gate['text']}. Add 'force' to arm anyway (your decision; logged)")
+        if ladder and len(c.auto_real_ladder) < 2:
+            raise TradeError("no ladder is configured: set AUTO_REAL_LADDER (e.g. 1,2) in .env first")
         if not self.campaign_since:
             self.campaign_since = time.time()
         grant = self.real_run >= c.auto_max_real_run
         self.state, self.armed_at, self.stop_reason, self.tech_stop = "ARMED", time.time(), None, None
         self.rearm_grant = grant
+        self.ladder_forced = bool(ladder) and not gate["open"]
         self.rearms += int(grant)
         self._save_state()
-        self._event("arm", who=who, ack_run=int(ack_run), grant=grant, force=force, gate_open=gate["open"])
+        self._event("arm", who=who, ack_run=int(ack_run), grant=grant, force=force, gate_open=gate["open"],
+                    ladder=self.ladder_on(), stakes=[x * c.auto_stake_usd for x in c.auto_real_ladder] if self.ladder_on() else None)
         lad_txt = ("compensate ladder " + "-".join(f"{x * c.auto_stake_usd:g}" for x in c.auto_real_ladder)
+                   + (" (your decision: the gate is closed)" if self.ladder_forced else "")
                    if self.ladder_on() else
-                   "flat (the compensate ladder waits for the gate)" if len(c.auto_real_ladder) > 1 else "flat")
+                   "flat (the compensate ladder waits for the gate; add 'ladder' to use it anyway)"
+                   if len(c.auto_real_ladder) > 1 else "flat")
         msg = (f"ARMED ({lad_txt}): real orders of ${self.stake():g} by {self.MODELS[self.model]} for up to "
                f"{c.auto_arm_ttl_h:g} h. Stops at {c.auto_max_real_run} real losses in a row, at -${c.auto_daily_loss_usd:g} "
                f"today, after {c.auto_max_real_bets_day} orders a day, at -${c.auto_campaign_loss_usd:g} in all. "
@@ -657,7 +666,7 @@ class AutoTrader:
             self._event("disarm", reason=why, who=who)
             log.warning("Real orders DISARMED (%s)", why)
         self.state, self.rearm_grant, self._prepared_rid = "DISARMED", False, 0
-        self.stop_reason = None
+        self.ladder_forced, self.stop_reason = False, None
         self._save_state()
 
     def kill(self, who: str = "operator") -> None:
@@ -718,6 +727,7 @@ class AutoTrader:
         """Real orders stop and the bot disarms.  It never resumes by itself: the operator must re-arm, naming the
         current run of losses (and clear the technical reason first, when there is one)."""
         self.state, self.stop_reason, self.stopped_at = "STOPPED", why, time.time()
+        self.ladder_forced = False
         self.rearm_grant, self._prepared_rid = False, 0
         if tech:
             self.tech_stop = tech
@@ -1122,8 +1132,9 @@ class AutoTrader:
     def ladder_on(self) -> bool:
         """The real compensate ladder is used only when it is configured (AUTO_REAL_LADDER with 2+ steps) AND the
         go-live gate is open: the calling model has >= GATE_MIN_N calls with its Wilson lower bound above the
-        break-even.  Without a proven edge a ladder only loses faster (docs/decision-review, section 7b)."""
-        return len(self.cfg.auto_real_ladder) > 1 and self.gate_status()["open"]
+        break-even.  Without a proven edge a ladder only loses faster (docs/decision-review, section 7b).
+        The operator can override that for one arming ('live arm ... force ladder'); it is logged."""
+        return len(self.cfg.auto_real_ladder) > 1 and (self.gate_status()["open"] or (self.ladder_forced and self.armed))
 
     def stake(self) -> float:
         """The real stake: the flat base, or with the ladder on, base x the ladder step for the current run of real
@@ -2056,6 +2067,7 @@ class AutoTrader:
             "events": list(self.events), "gate": self.gate_status(), "break_even": self.BREAK_EVEN,
             "live_allowed": c.live_allowed, "tos_risk_accepted": c.tos_risk_accepted,
             "real_ladder": list(c.auto_real_ladder), "ladder_on": self.ladder_on(), "next_real_stake": self.stake(),
+            "ladder_forced": self.ladder_forced,
             "shadow": {"on": c.auto_shadow, "run": self.shadow_run, "attempts_today": self.shadow_attempts_today,
                        "longest_today": self.shadow_longest_today, "stops_today": self.shadow_stops_today,
                        "last": rec.get("shadow")},

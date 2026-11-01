@@ -28,7 +28,7 @@ HELP = """Commands (amount is in the account's trading currency, shown by 'statu
   auto            auto mode: accuracy, paper P&L, models
   auto on|off     start / stop the automatic calls (paper: nothing is placed)
   live            the real-money state: losses in a row, orders today, budget, campaign, clock, gate
-  live arm run=<n> day=<YYYY-MM-DD> [force]
+  live arm run=<n> day=<YYYY-MM-DD> [force] [ladder]   (ladder: the compensate ladder although the gate is closed)
                   allow REAL orders (AUTO_STAKE_USD each, flat). You must type the current run of real
                   losses and today's date. Needs LIVE_ALLOWED=1 and TOS_RISK_ACCEPTED=1 in .env.
                   The bot stops and disarms at AUTO_MAX_REAL_RUN losses in a row (only a real WIN resets
@@ -112,7 +112,8 @@ async def repl(trader: Trader, auto: AutoTrader, cfg: config.Config) -> None:
                         print(f"live arm run=<losses in a row> day=<YYYY-MM-DD> [force]   (now: run={auto.real_run} "
                               f"day={time.strftime('%Y-%m-%d')})")
                         continue
-                    print(auto.arm(int(kv["run"]), kv["day"], who="terminal", force="force" in args))
+                    print(auto.arm(int(kv["run"]), kv["day"], who="terminal", force="force" in args,
+                                   ladder="ladder" in args))
                     print(auto.live_line())
                 elif args[0] == "off":
                     auto.disarm("live off", who="terminal")

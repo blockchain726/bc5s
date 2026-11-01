@@ -4,7 +4,8 @@
   POST /trade  {"side": "up", "amount": 5}  -> a manual order (only while armed; counted like every real order)
   GET  /auto                            -> auto mode: accuracy, paper P&L, last call, models, the real-money state
   POST /auto   {"on": true, "model": "mhh", "progression": 1.5}   -> auto mode, calling model, paper progression
-  POST /auto   {"arm": true, "ack_run": 0, "day": "2026-10-30", "force": false}  -> allow real orders (typed ack)
+  POST /auto   {"arm": true, "ack_run": 0, "day": "2026-10-30", "force": false, "ladder": false}  -> allow real orders
+               (typed ack; "ladder": true with "force" uses the compensate ladder although the gate is closed)
   POST /auto   {"live": false} | {"kill": true} | {"clear": "unknown", "outcome": "none"}
                {"reset_run": true, "ack_run": 6, "reason": "new model"}  -> the run of real losses back to 0 (logged)
   GET  /                                -> decision dashboard (the same panel the bot draws on the BC page)
@@ -90,7 +91,7 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                 auto.kill(who="api")
             if body.get("arm"):
                 auto.arm(int(body.get("ack_run", -1)), str(body.get("day", "")), who="api",
-                         force=bool(body.get("force")))
+                         force=bool(body.get("force")), ladder=bool(body.get("ladder")))
             if "live" in body:
                 if body["live"]:
                     raise TradeError('arming is {"arm": true, "ack_run": <losses in a row>, "day": "YYYY-MM-DD"}')
