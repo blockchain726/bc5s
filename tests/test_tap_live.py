@@ -62,3 +62,11 @@ def test_live_skips_uncalibrated_far_cells(tmp_path, monkeypatch):
     assert lv._choose(1_000_000.0) is None
     far["p_emp"] = 0.3                                       # measured 30% at x8 -> EV 2.0: yes
     assert lv._choose(1_000_000.0) is not None
+
+
+def test_stake_and_mode_from_the_page_survive_a_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAP_LIVE", "off"); monkeypatch.setenv("TAP_STAKE", "0.1")
+    lv = TapLive(FakeAnalyzer(), tmp_path)
+    lv.set_stake(0.3); lv.set_mode("real")
+    lv2 = TapLive(FakeAnalyzer(), tmp_path)                 # a restart with the same .env: the page's values win
+    assert lv2.stake == 0.3 and lv2.mode == "real"

@@ -107,8 +107,14 @@ class TapLive:
         self.state_path = log_dir / "tap_live_state.json"
         self.events_path = log_dir / "tap_live.jsonl"
         self.kill_path = log_dir / "TAP_KILL"
-        self.st = {"real": self._book(), "demo": self._book(), "ratios": [], "stopped": None, "orders": {}}
+        self.st = {"real": self._book(), "demo": self._book(), "ratios": [], "stopped": None, "orders": {},
+                   "settings": {}}
         self._load()
+        saved = self.st.get("settings") or {}                   # what the page set last: it beats .env's defaults
+        if saved.get("stake"):
+            self.stake = float(saved["stake"])
+        if saved.get("mode") in ("off", "demo", "real"):
+            self.mode = saved["mode"]
         self.busy = False
         self.last_at = 0.0
         self.paused_until = 0.0
@@ -485,6 +491,8 @@ class TapLive:
         if mode not in ("off", "demo", "real"):
             raise ValueError("Tap live mode must be off, demo or real")
         was, self.mode = self.mode, mode
+        self.st.setdefault("settings", {})["mode"] = mode
+        self._save()
         self._event("mode", was=was, who=who)
         msg = (f"Tap live {mode.upper()}: ${self.stake:g} per tap, budget ${self.budget:g}, min EV {self.min_ev:.2f}"
                + (f", server/label ratio {self.ratio():.2f}" if self.ratio() else
@@ -498,6 +506,8 @@ class TapLive:
         if not 0.1 <= usd <= 5:
             raise ValueError("the Tap stake must be between $0.1 and $5")
         was, self.stake = self.stake, round(usd, 2)
+        self.st.setdefault("settings", {})["stake"] = self.stake
+        self._save()
         self._event("stake", was=was, who=who)
         log.warning("Tap live stake $%g per tap (was $%g)", self.stake, was)
         return f"Tap stake ${self.stake:g} per tap"
