@@ -62,6 +62,7 @@ button.on{background:#2f6fd6;border-color:#2f6fd6;color:#fff}button.liveb.on{bac
   </div>
   <div>
     <div class="c" id="paper"></div>
+    <div class="c" id="models"></div>
     <div class="c"><div class="ct"><span>DOES OUR EV PREDICT IT?</span><span class="mute">virtual taps by our EV</span></div>
       <table id="ev"></table></div>
     <div class="c" id="public"></div>
@@ -93,10 +94,12 @@ function grid(g) {
     h += `<tr class="${r === 0 ? 'now' : ''}"><td class="px">${c0.lo.toFixed(0)}${r === 0 ? ' ◀' : ''}</td>` + ks.map(k => {
       const c = at[k + ',' + r];
       const pick = g.pick && g.pick[0] === k && g.pick[1] === r;
+      const dots = Object.entries(g.picks || {}).filter(([n, p]) => p && p[0] === k && p[1] === r && n !== 'label')
+        .map(([n]) => `<i title="${n}" style="display:inline-block;width:7px;height:7px;border-radius:50%;margin:0 1px;background:${MODEL_COLORS[n] || '#fff'}"></i>`).join('');
       const bg = c.ev >= 1 ? `rgba(34,210,122,${Math.min(0.6, (c.ev - 1) * 2 + 0.12).toFixed(2)})`
                            : `rgba(255,84,104,${Math.min(0.35, (1 - c.ev) * 0.5).toFixed(2)})`;
       return `<td class="cell ${c.tappable ? '' : 'off'} ${pick ? 'pick' : ''}" style="background:${bg}">` +
-             `<b>×${c.odds.toFixed(2)}</b><span>EV ${c.ev.toFixed(2)}</span></td>`;
+             `<b>×${c.odds.toFixed(2)}</b><span>EV ${c.ev.toFixed(2)}</span>${dots ? '<div>' + dots + '</div>' : ''}</td>`;
     }).join('') + '</tr>';
   }
   el.innerHTML = h;
@@ -123,6 +126,21 @@ function ev(rows) {
     '<th>bc.game P</th><th>avg ×</th><th>real return</th></tr>' + rows.map(s =>
     `<tr><td class="l">${s.key}</td><td>${s.n.toLocaleString()}</td><td>${pct(s.hit)}</td><td>${pct(s.po)}</td>` +
     `<td>${pct(s.pm)}</td><td>×${s.odds.toFixed(2)}</td><td style="${shade(s.ret, s.n)}">${sgn(s.ret)}</td></tr>`).join('');
+}
+const MODEL_COLORS = {};
+function models(ms) {
+  if (!ms.length) return;
+  ms.forEach(m => MODEL_COLORS[m.name] = m.color);
+  const since = ms.map(m => m.since).filter(Boolean);
+  const t0 = since.length ? new Date(Math.min(...since) * 1000).toLocaleTimeString() : '–';
+  document.getElementById('models').innerHTML =
+    `<div class="ct"><span>PICKERS ON TRIAL</span><span class="mute">$1 paper per tap each, wins at bc.game's payout, since ${t0} &middot; <a href="#" id="mreset" style="color:#5aa9ff">reset books</a></span></div>` +
+    `<table><tr><th style="text-align:left">picker</th><th>taps</th><th>won</th><th>P&amp;L</th><th>per $</th><th>last 1 h</th><th>now</th></tr>` +
+    ms.map(m => `<tr><td style="text-align:left"><i style="display:inline-block;width:10px;height:10px;border:2px solid ${m.color};margin-right:6px;vertical-align:middle"></i><b>${m.name}</b><div class="mute" style="font-size:10px">${m.desc}</div></td>` +
+      `<td>${m.bets || 0}</td><td>${m.bets ? pct(m.wins / m.bets) : '–'}</td><td class="${(m.pnl || 0) >= 0 ? 'up' : 'down'}">${usd(m.pnl || 0)}</td>` +
+      `<td>${m.bets ? ((100 * (m.pnl || 0)) / m.bets).toFixed(0) + '%' : '–'}</td><td class="${(m.hour || 0) >= 0 ? 'up' : 'down'}">${usd(m.hour || 0)} <span class="mute">(${m.hour_n || 0})</span></td>` +
+      `<td>${m.pick ? `+${m.pick[0]}c ${m.pick[1] >= 0 ? '+' : ''}${m.pick[1]}b` : (m.open ? 'open ' + m.open : '–')}</td></tr>`).join('') + `</table>`;
+  document.getElementById('mreset').onclick = async e => { e.preventDefault(); if (confirm('Reset the trial books?')) await post({tap_models_reset: 1}); };
 }
 function paper(p) {
   const wr = p.bets ? p.wins / p.bets : null;
@@ -231,7 +249,7 @@ async function tick() {
     `than their multiplier prices in, far cells less often. Statistics since ${new Date(d.since * 1000).toLocaleString()}.</div>`;
   const rg = d.regime || {};
   document.getElementById('info').innerHTML += `<div style="margin-top:4px">regime now: <b>${rg.name || '?'}</b> &middot; last 60 current-band taps hit ${rg.trailing != null ? Math.round(100 * rg.trailing) + '%' : '–'} &middot; 60 s price range ${rg.range_bands != null ? rg.range_bands + ' bands' : '–'} &middot; hit-rate factor <b>${rg.factor}</b> <span class="mute">(calm+hot 1.20 &middot; calm+cold 1.04 &middot; wild+hot 0.94 &middot; wild+cold 0.76, from 70k measured taps)</span></div>`;
-  grid(d.grid); cells(d.cells || []); ev(d.ev || []); paper(d.paper || {}); pub(d.public || {});
+  models(d.models || []); grid(d.grid); cells(d.cells || []); ev(d.ev || []); paper(d.paper || {}); pub(d.public || {});
 }
 tick(); setInterval(tick, 1000);
 </script></body></html>"""

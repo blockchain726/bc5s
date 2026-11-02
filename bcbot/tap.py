@@ -59,6 +59,42 @@ REGIME_RANGE_BANDS = 4.0      # 60 s price range in band units: below = calm
 REGIME_HOT = 0.45             # trailing hit rate of the last 60 settled current-band taps: at least = hot
 TRAILING_PRIOR_N = 30         # the long-run rate counts as this many taps against the trailing 60 (shrinkage)            # virtual taps of a cell kind before its realized hit rate calibrates the model
 STEP_CONFIRM_S = 10          # a band size read off the labels that differs from the settings must hold this long
+
+
+# ---------- candidate pickers, tested side by side on paper: each its own book and its own colour on the page ----
+def _calm(ctx) -> bool:
+    rb = ctx["regime"].get("range_bands")
+    return rb is not None and rb < REGIME_RANGE_BANDS
+
+
+def _score_label(c, ctx):
+    return c["ev_emp"]                                    # measured hit rate x the grid label (regime factor in)
+
+
+def _score_paid(c, ctx):
+    return c["ev_emp"] * ctx["pay"](c["k"])               # ... x what bc.game's server really pays of the label
+
+
+MODELS = (
+    {"name": "label", "color": "#facc15", "bar": None, "score": _score_label,
+     "desc": "the live picker: best EV at the grid label, the live bar (feeds the paper book)"},
+    {"name": "paid", "color": "#a3e635", "bar": 1.35, "score": _score_paid,
+     "desc": "best EV at the paid odds (hit rate x label x payout) >= 1.35"},
+    {"name": "paid-lo", "color": "#f472b6", "bar": 1.15, "score": _score_paid,
+     "desc": "EV at the paid odds >= 1.15: more taps, a thinner edge"},
+    {"name": "paid-calm", "color": "#22d3ee", "bar": 1.35,
+     "score": lambda c, x: _score_paid(c, x) if _calm(x) else None,
+     "desc": "paid >= 1.35, only while the 60 s range is under 4 bands"},
+    {"name": "paid-far", "color": "#fb923c", "bar": 1.35,
+     "score": lambda c, x: _score_paid(c, x) if c["k"] >= 3 else None,
+     "desc": "paid >= 1.35, three or more columns ahead (two ahead pays least)"},
+    {"name": "calm-label", "color": "#e879f9", "bar": None,
+     "score": lambda c, x: _score_label(c, x) if _calm(x) else None,
+     "desc": "the live picker, only while the 60 s range is under 4 bands"},
+    {"name": "big-label", "color": "#60a5fa", "bar": 1.35,
+     "score": lambda c, x: _score_paid(c, x) if c["odds"] >= 3.5 else None,
+     "desc": "paid >= 1.35, only cells whose label is 3.5 or more"},
+)
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
 
@@ -193,14 +229,17 @@ DRAW_JS = r"""(d) => {
     .off{opacity:.45}
     .pick{border:3px solid #facc15;box-shadow:0 0 8px rgba(250,204,21,.7)}
     .pick span{color:#facc15;opacity:1;font-weight:700;font-size:10px;background:rgba(11,14,19,.75);padding:0 2px}
+    .mpick{border:2px solid #fff}
+    .mpick span{color:inherit;opacity:1;font-weight:700;font-size:9px;background:rgba(11,14,19,.75);padding:0 2px;left:2px;right:auto;top:1px;bottom:auto}
     .hit{border:3px solid #22d27a;background:rgba(34,210,122,.18)}.miss{border:3px solid #ff5468;background:rgba(255,84,104,.14)}
     .hit span{color:#22d27a;font-weight:700;font-size:10px;opacity:1}.miss span{color:#ff5468;font-weight:700;font-size:10px;opacity:1}
   </style><div class="wrap" style="left:${L}px;top:${Tp}px;width:${W}px;height:${H}px">`;
   for (const c of d.cells) {
     const x0 = X(c.t0) - L, x1 = X(c.t1) - L, y0 = Y(c.hi) - Tp, y1 = Y(c.lo) - Tp;
     if (x1 < 0 || x0 > W || Math.max(y0, y1) < 0 || Math.min(y0, y1) > H) continue;
-    h += `<div class="cell ${c.cls}" style="left:${x0.toFixed(1)}px;top:${Math.min(y0, y1).toFixed(1)}px;` +
-         `width:${(x1 - x0).toFixed(1)}px;height:${Math.abs(y1 - y0).toFixed(1)}px"><span>${c.label}</span></div>`;
+    const i = c.inset || 0, extra = c.color ? `border-color:${c.color};color:${c.color};` : '';
+    h += `<div class="cell ${c.cls}" style="left:${(x0 + i).toFixed(1)}px;top:${(Math.min(y0, y1) + i).toFixed(1)}px;` +
+         `width:${(x1 - x0 - 2 * i).toFixed(1)}px;height:${(Math.abs(y1 - y0) - 2 * i).toFixed(1)}px;${extra}"><span>${c.label}</span></div>`;
   }
   host.shadowRoot.innerHTML = h + '</div>';
   return 'ok';
@@ -293,9 +332,11 @@ class TapAnalyzer:
         self.band_hits: deque = deque(maxlen=200)         # (t1, hit) of settled current-band virtual taps
         self.regime = {"name": "unknown", "factor": 1.0, "trailing": None, "range_bands": None}
         self.paper_path = log_dir / "tap_paper.jsonl"
+        self.models_path = log_dir / "tap_models.jsonl"   # settled picks of the candidate pickers (not the paper book)
+        self.model_hour: dict = {}                         # model -> deque of (settled at, pnl) for the last hour
         self.public_path = log_dir / "tap_public.jsonl"
         self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
-                      "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0},
+                      "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {},
                       "public": {"n": 0, "won": 0, "ret": 0.0, "odds": 0.0, "checked": 0, "agree_tick": 0,
                                  "agree_cross": 0, "odds_checked": 0, "odds_err": 0.0, "by_odds": {}}}
         self.paper_recent: deque = deque(maxlen=12)
@@ -623,24 +664,67 @@ class TapAnalyzer:
         if not tappable:
             k_min = int(self.cfg.get("orderGridInterval") or 0)
             tappable = {k for k in range(k_min, k_min + 3) if grid["cols"][k] - now >= MIN_AHEAD_MS}
-        best = None                                          # dropped early in a column (when the snapshot is taken)
         for c in grid["cells"]:
             c["tappable"] = c["k"] in tappable
             self.pending.append(dict(c, created=now))
-            if c["tappable"] and c["ev_emp"] is not None and (best is None or c["ev_emp"] > best["ev_emp"]):
-                best = c                                     # only cell kinds measured at this band size
         grid["pick"] = None
+        grid["picks"] = {}
         grid["ev_bar"] = self.ev_bar()
-        taken_cols = {c["t0"] for c in self.paper_pending}      # one paper tap per column, like the live tap
-        if best is not None and best["t0"] in taken_cols:
-            best = None
-        lv = getattr(self, "live", None)                        # with live taps on, a paper box is placed only when
-        if best is not None and lv is not None and lv.mode != "off" and lv._why_not(now) is not None:
-            best = None                                         # the live tap is free to click it (spacing, open taps)
-        if best is not None and best["ev_emp"] >= grid["ev_bar"] and best["odds_src"] == "bc":   # the live bar
-            grid["pick"] = (best["k"], best["r"])
-            self.paper_pending.append(dict(best, created=now, price=price))
+        self._pick_models(grid, now, price)
         self.grid = grid
+
+    def _pick_models(self, grid: dict, now: float, price: float) -> None:
+        """Every candidate picker (MODELS) places at most one paper tap per column: its best cell by its own score
+        when that clears its bar.  "label" is the live picker and feeds the paper book; the others only their own
+        books.  Only cell kinds measured at this band size, at bc.game's own label, one per column, and (with live
+        taps on) only when the live tap is free to click it, so each box shows exactly where a real tap would go."""
+        lv = getattr(self, "live", None)
+        if lv is not None and lv.mode != "off" and lv._why_not(now) is not None:
+            return
+        ctx = {"regime": self.regime, "pay": lv.payout if lv is not None else (lambda k: PAYOUT_FALLBACK)}
+        taken: dict = {}
+        for c in self.paper_pending:
+            taken.setdefault(c.get("model", "label"), set()).add(c["t0"])
+        for m in MODELS:
+            best, best_s = None, None
+            for c in grid["cells"]:
+                if not c["tappable"] or c["ev_emp"] is None:
+                    continue
+                s = m["score"](c, ctx)
+                if s is not None and (best_s is None or s > best_s):
+                    best, best_s = c, s
+            bar = m["bar"] if m["bar"] is not None else grid["ev_bar"]
+            if best is None or best_s < bar or best["odds_src"] != "bc" or best["t0"] in taken.get(m["name"], ()):
+                continue
+            grid["picks"][m["name"]] = (best["k"], best["r"])
+            if m["name"] == "label":
+                grid["pick"] = (best["k"], best["r"])
+            self.paper_pending.append(dict(best, created=now, price=price, model=m["name"], score=round(best_s, 4)))
+
+    def models_summary(self) -> list:
+        """The candidate pickers side by side: colour, rule, book (wins at bc.game's payout), the last hour, and
+        what each is picking now."""
+        now = time.time()
+        picks = (self.grid or {}).get("picks") or {}
+        out = []
+        for m in MODELS:
+            b = (self.stats.get("models") or {}).get(m["name"]) or {"bets": 0, "wins": 0, "pnl": 0.0,
+                                                                     "pnl_label": 0.0, "since": None}
+            dq = self.model_hour.get(m["name"])
+            while dq and dq[0][0] < now - 3600:
+                dq.popleft()
+            out.append({"name": m["name"], "color": m["color"], "desc": m["desc"],
+                        "bar": m["bar"] if m["bar"] is not None else self.ev_bar(),
+                        **{k: b.get(k) for k in ("bets", "wins", "pnl", "pnl_label", "since")},
+                        "hour": round(sum(p for _, p in dq), 4) if dq else 0.0, "hour_n": len(dq) if dq else 0,
+                        "open": sum(1 for c in self.paper_pending if c.get("model", "label") == m["name"]),
+                        "pick": picks.get(m["name"])})
+        return out
+
+    def reset_models(self) -> None:
+        self.stats["models"] = {}
+        self.model_hour = {}
+        log.info("Tap candidate pickers: books reset")
 
     @staticmethod
     def _grid(now, price, gap, step, vol_cfg, vol_real, max_odds, bc_odds=None, calib=None, hits=None) -> dict:
@@ -699,9 +783,24 @@ class TapAnalyzer:
         lv = getattr(self, "live", None)
         for c in pdue:
             hit, _ = touched(ticks, c["lo"], c["hi"], c["t0"], c["t1"])
+            model = c.get("model", "label")
             pay = lv.payout(c["k"]) if lv else PAYOUT_FALLBACK        # bc.game pays this fraction of the grid label
             pnl = round((c["odds"] * pay - 1.0) if hit else -1.0, 4)  # what the server would have paid
             pnl_label = round((c["odds"] - 1.0) if hit else -1.0, 4)  # what the grid label promised (the old P&L)
+            mb = self.stats.setdefault("models", {}).setdefault(
+                model, {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0, "since": time.time()})
+            mb["bets"] += 1
+            mb["wins"] += hit
+            mb["pnl"] = round(mb["pnl"] + pnl, 4)
+            mb["pnl_label"] = round(mb["pnl_label"] + pnl_label, 4)
+            self.model_hour.setdefault(model, deque()).append((time.time(), pnl))
+            if model != "label":                                       # a candidate: its own log, not the paper book
+                rec = {"t": c["created"], "model": model, "k": c["k"], "r": c["r"], "lo": c["lo"], "hi": c["hi"],
+                       "t0": c["t0"], "odds": c["odds"], "ev_emp": c.get("ev_emp"), "score": c.get("score"),
+                       "price": c["price"], "hit": hit, "pnl": pnl, "pnl_label": pnl_label, "pay": round(pay, 3)}
+                with open(self.models_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(rec) + "\n")
+                continue
             strict = (c.get("ev_emp") or c["ev"]) * pay >= (lv.min_ev if lv else EV_MIN)   # clears the bar at the
             p = self.stats["paper"]                                                        # paid odds too
             p["bets"] += 1
@@ -781,9 +880,16 @@ class TapAnalyzer:
             cls = ("good" if ev is not None and ev >= bar else "") + ("" if c.get("tappable") else " off")
             cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": cls,
                           "label": f"{ev:.2f}" if ev is not None else "·"})
-        for c in self.paper_pending:                          # paper taps still waiting for their window
-            cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "pick",
-                          "label": f"PAPER $1 x{c['odds']:.2f} ({c.get('odds_src', 'port')})"})
+        colors = {m["name"]: m["color"] for m in MODELS}
+        order = {m["name"]: i for i, m in enumerate(MODELS)}
+        for c in self.paper_pending:                          # paper taps still waiting for their window: the paper
+            model = c.get("model", "label")                   # book's in yellow, each candidate picker in its colour
+            if model == "label":                              # (nested outlines when they pick the same cell)
+                cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "pick",
+                              "label": f"PAPER $1 x{c['odds']:.2f} ({c.get('odds_src', 'port')})"})
+            else:
+                cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "mpick",
+                              "color": colors.get(model, "#fff"), "inset": 3 * order.get(model, 1), "label": model})
         for r in list(self.paper_recent)[-8:]:                # settled ones, while still on screen
             cells.append({"t0": r["t0"], "t1": r["t0"] + gap, "lo": r["lo"], "hi": r["hi"],
                           "cls": "hit" if r["hit"] else "miss",
@@ -801,7 +907,7 @@ class TapAnalyzer:
         def row(k, v):
             return f'<div class="row"><span>{k}</span><span>{v}</span></div>'
 
-        pick = self.paper_pending[-1] if self.paper_pending else None
+        pick = next((c for c in reversed(self.paper_pending) if c.get("model", "label") == "label"), None)
         if pick:
             nxt = (f'<div class="big up" style="font-size:20px">+{pick["k"]} col &middot; {pick["r"]:+d} band</div>'
                    f'<div class="mute">x{pick["odds"]:.2f} &middot; our P(hit) {pick["po"]:.0%} &middot; EV {pick["ev"]:.2f} '
@@ -825,7 +931,15 @@ class TapAnalyzer:
                          f'<div class="mute">server / label x{lv.ratio() or 0:.2f} &middot; open {len(lv.open_orders())}'
                          f' &middot; losses in a row {b["run"]}</div>'
                          f'<div class="mute">{"STOPPED: " + stop["why"] if stop else (lv.last_reason or "")}</div></div>')
-        n_open = len(self.paper_pending)
+        n_open = sum(1 for c in self.paper_pending if c.get("model", "label") == "label")
+        rows_m = "".join(
+            f'<div class="row"><span><i style="display:inline-block;width:9px;height:9px;border:2px solid {m["color"]};'
+            f'margin-right:5px;vertical-align:middle"></i>{m["name"]}</span>'
+            f'<span><b class="pnl {"pos" if (m["pnl"] or 0) >= 0 else "neg"}">{usd(m["pnl"] or 0)}</b> '
+            f'<span class="mute">{m["bets"] or 0}t {m["wins"] or 0}w &middot; 1h {m["hour"]:+.1f}</span></span></div>'
+            for m in self.models_summary())
+        models_card = (f'<div class="c"><div class="ct"><span>PICKERS ON TRIAL</span>'
+                       f'<span class="mute">$1 paper each &middot; wins at the paid odds</span></div>{rows_m}</div>')
         open_row = (f'<div class="mute">open: {n_open} tap{"s" if n_open != 1 else ""} &middot; ${n_open:.0f} at risk '
                     f'&middot; wallet view {usd(p["pnl"] - n_open)}</div>' if n_open else "")
         results = "".join(
@@ -865,7 +979,7 @@ class TapAnalyzer:
             f'<div class="c"><div class="ct"><span>PAPER P&amp;L</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
             f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr} &middot; at the grid label {usd(p.get("pnl_label", 0.0))}</div>{open_row}'
-            + (f'<div class="sq">{strip}</div>' if strip else "") + '</div>'
+            + (f'<div class="sq">{strip}</div>' if strip else "") + '</div>' + models_card
             + (f'<div class="c"><div class="ct"><span>LAST TAPS</span><span class="mute">cell &middot; result</span></div>'
                f'{results}</div>' if results else "")
             + f'<div class="c"><div class="ct"><span>VOLATILITY</span><span class="mute">per 0.5 s</span></div>'
@@ -1006,8 +1120,9 @@ class TapAnalyzer:
             "debug_texts": self.debug_texts,
             "sym_cfg": self.sym_cfg, "market_open": self.market_open(), "live": self.live.summary(),
             "regime": self.regime,
+            "models": self.models_summary(),
             "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": self.ev_bar(),
-                      "open": len(self.paper_pending), "payout": self.live.payout_table(), "min_ev": self.live.min_ev,
+                      "open": sum(1 for c in self.paper_pending if c.get("model", "label") == "label"), "payout": self.live.payout_table(), "min_ev": self.live.min_ev,
                       "strict": self.stats.get("paper_strict")},
             "public": {**pub, "recent": list(self.public_recent)[::-1],
                        "odds_ratio": float(np.median(self.odds_ratio)) if self.odds_ratio else None},

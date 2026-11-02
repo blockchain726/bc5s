@@ -32,10 +32,12 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   ahead, `TapLive.payout`); the P&L at the label is shown alongside. Until 2026-11-02 the book counted the label,
   which is why paper looked profitable (+$588 per $1 on 1,523 picks) while the same taps lost real money (-$42).
 - The bot's own settlement of a cell agrees with bc.game's result in 99% of real orders.
+- Candidate pickers (`MODELS` in `bcbot/tap.py`) run side by side on paper, each with its own book, colour and box
+  on the page; `label` is the live picker. Their books are in `tap_stats.json` ("models") and `logs/tap_models.jsonl`.
 
 ## Commands
 
-- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (53 tests). Check syntax without a pipe
+- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (56 tests). Check syntax without a pipe
   before committing (`python -c "import ast, sys; ast.parse(open(f).read())"`); a piped check hides the exit code.
 - Keep running: `powershell -File tools\supervise.ps1` (log in `logs\supervisor.log`).
 - Git: commit identity `blockchain726 <blockchain726@users.noreply.github.com>`; branch `micro-ensemble`, kept equal

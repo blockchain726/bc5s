@@ -36,6 +36,8 @@ def _analyzer(tmp_path):
     a.paper_path = tmp_path / "tap_paper.jsonl"
     a.pending = []
     a.band_hits = deque(maxlen=200)
+    a.model_hour = {}
+    a.models_path = tmp_path / "tap_models.jsonl"
     return a
 
 

@@ -103,6 +103,11 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                 auto.reset_run(int(body.get("ack_run", -1)), str(body.get("reason", "")), who="api")
             if "ladder" in body and not body.get("arm"):             # switch the ladder while armed
                 auto.set_ladder(bool(body["ladder"]), who="api")
+            if body.get("tap_models_reset"):                                      # the trial pickers' paper books
+                if tap is None:
+                    raise TradeError("the Tap analyzer is not running (start without --no-tap)")
+                tap.reset_models()
+                return web.json_response({"ok": True, "models": tap.models_summary()})
             if "tap_live" in body or "tap_stake" in body or body.get("tap_clear"):   # live taps (Tap page)
                 if tap is None:
                     raise TradeError("the Tap analyzer is not running (start without --no-tap)")
