@@ -11,6 +11,8 @@ python -m venv .venv
 copy .env.example .env      # then fill in BC_EMAIL / BC_PASS
 ```
 
+To run it on another PC, see `docs/run-on-another-pc.md` (what to clone and the three private files to copy by hand).
+
 ## Run
 
 ```powershell
