@@ -689,9 +689,11 @@ class TapAnalyzer:
                 s["ret"] += (c["odds"] if hit else 0.0) - 1.0
                 s["pm"] += c["pm"]
                 s["po"] += c["po"]
+        pay = self.live.ratio() if getattr(self, "live", None) else None    # the server pays ~65% of the label
         for c in pdue:
             hit, _ = touched(ticks, c["lo"], c["hi"], c["t0"], c["t1"])
-            pnl = round((c["odds"] - 1.0) if hit else -1.0, 4)
+            real_odds = c["odds"] * pay if pay else c["odds"]                # paper books at the real payout once measured
+            pnl = round((real_odds - 1.0) if hit else -1.0, 4)
             p = self.stats["paper"]
             p["bets"] += 1
             p["wins"] += hit
@@ -803,7 +805,7 @@ class TapAnalyzer:
         return (
             f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; TAP {SYMBOL}</span>'
             f'<span class="mode paper">PAPER</span></div>'
-            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar)</span></div>{nxt}</div>'
+            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at the server's real payout</span></div>{nxt}</div>'
             f'<div class="c"><div class="ct"><span>PAPER P&amp;L</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
             f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr}</div>{open_row}'
