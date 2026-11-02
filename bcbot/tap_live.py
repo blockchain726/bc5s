@@ -136,9 +136,13 @@ class TapLive:
         except (OSError, ValueError):
             pass
         st = self.st.get("stopped")
-        if st and "2024" in str(st.get("why", "")):           # a stop for "tap config error" (the band size changed
-            log.warning("Tap live: dropping the old stop %r (no longer a stop condition)", st.get("why"))
-            self.st["stopped"] = None                          # under an order) is not a stop any more
+        why = str((st or {}).get("why", ""))
+        if st and ("2024" in why or "not settled 60 s" in why):   # no longer stop conditions (band change under
+            log.warning("Tap live: dropping the old stop %r (no longer a stop condition)", why)   # an order; a
+            self.st["stopped"] = None                              # result missed across a restart)
+            for o in self.st["orders"].values():
+                if o.get("result") is None and o.get("stale"):
+                    o["result"] = "STALE"
 
     def _save(self) -> None:
         err = None
@@ -407,15 +411,19 @@ class TapLive:
                  b["wins"], b["bets"], b["run"])
 
     def check_stale(self) -> None:
-        """An order not settled 60 s after its window ended: technical stop (it must be checked by hand)."""
+        """An order not settled 60 s after its window ended (its end message was missed, e.g. across a restart):
+        it is dropped from the open list as STALE (the server settled it; its result is on the page's History) and
+        live taps go on.  The bot is not stopped: it placed the order, it just did not see the result."""
         if not self.a.ticks:
             return
         now_ms = self.a.ticks[-1][0]
         for o in self.open_orders():
             if not o.get("unknown") and now_ms - o["t0"] > 62000 and not o.get("stale"):
                 o["stale"] = True
+                o["result"] = "STALE"
+                self._event("stale", id=o["id"], t0=o["t0"], usd=o.get("usd"))
+                log.warning("Tap live: order %s not settled 60 s after its window: dropped as STALE (see History)", o["id"])
                 self._save()
-                self._stop(f"order {o['id']} not settled 60 s after its window")
 
     def set_mode(self, mode: str, who: str = "operator") -> str:
         """Switch live taps off / demo / real at runtime (the dashboard, with the token).  Logged.  A budget stop
