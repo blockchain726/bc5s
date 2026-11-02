@@ -7,6 +7,7 @@
 """
 import argparse
 import asyncio
+import os
 import logging
 import threading
 import time
@@ -174,12 +175,19 @@ async def main() -> None:
         if args.auto:
             await auto.start()
         tap = None
-        if not args.no_tap:                      # Tap analyzer: its own bc.game tab, paper only, page /tap
-            tap = TapAnalyzer(trader, cfg.auto_log.parent)
-            try:
-                await tap.start()
-            except Exception as e:
-                log.warning("Tap analyzer did not start: %r", e)
+        if not args.no_tap:                      # Tap analyzer: its own bc.game tab, page /tap; its tab opens a
+            tap = TapAnalyzer(trader, cfg.auto_log.parent)   # little after the Up/Down page (two game launches
+            delay = float(os.getenv("TAP_START_DELAY_S", "25"))   # at once trip bc.game's launch limit)
+
+            async def start_tap_later():
+                await asyncio.sleep(delay)
+                try:
+                    await tap.start()
+                except Exception as e:
+                    log.warning("Tap analyzer did not start: %r", e)
+
+            log.info("Tap analyzer opens its tab in %g s", delay)
+            asyncio.get_running_loop().create_task(start_tap_later())
         runner = await api.start(trader, auto, cfg, tap)
         try:
             if args.no_repl:
