@@ -138,7 +138,10 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
     async def tap_state(_: web.Request) -> web.Response:
         if tap is None:
             return web.json_response({"error": "the Tap analyzer is not running"})
-        return web.json_response(tap.state())
+        try:
+            return web.json_response(tap.state())
+        except Exception as e:                    # its tab opens a little after the Up/Down page
+            return web.json_response({"error": f"the Tap analyzer is starting ({type(e).__name__})"})
 
     app = web.Application(middlewares=[auth])
     app.add_routes([web.get("/", dashboard), web.get("/status", status), web.post("/trade", trade),
