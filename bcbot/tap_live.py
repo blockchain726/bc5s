@@ -102,6 +102,7 @@ class TapLive:
         self.ratio_min_n = int(_flag("TAP_RATIO_MIN_N", "5"))
         self.ratio_boot = float(_flag("TAP_RATIO_BOOT", "0.85"))   # assumed server/label ratio before it is measured
         self.use_ratio = _flag("TAP_USE_RATIO", "1") != "0"        # 0: ignore the measured payout, price at the label
+        self.lead_extra_ms = int(_flag("TAP_LEAD_EXTRA_MS", "600"))  # click margin over the game's 4.3 s lead
         self.loss_run_pause = int(_flag("TAP_LOSS_RUN_PAUSE", "10"))
         self.pause_min = float(_flag("TAP_PAUSE_MIN", "10"))
         self.state_path = log_dir / "tap_live_state.json"
@@ -144,7 +145,7 @@ class TapLive:
             pass
         st = self.st.get("stopped")
         why = str((st or {}).get("why", ""))
-        if st and ("2024" in why or "not settled 60 s" in why or "no answer in 5 s" in why or "was booked at" in why):
+        if st and not why.startswith("budget"):               # only a budget stop survives a restart
             log.warning("Tap live: dropping the old stop %r (no longer a stop condition)", why)   # an order; a
             self.st["stopped"] = None                              # result missed across a restart)
             for o in self.st["orders"].values():
@@ -244,7 +245,7 @@ class TapLive:
         taken = {o["t0"] for o in self.st["orders"].values()}          # one live tap per column
         best = None
         for c in g.get("cells", []):
-            if not c.get("tappable") or c.get("odds_src") != "bc" or c["t0"] - now_ms < MIN_AHEAD_MS + 300:
+            if not c.get("tappable") or c.get("odds_src") != "bc" or c["t0"] - now_ms < MIN_AHEAD_MS + self.lead_extra_ms:
                 continue
             if c.get("p_emp") is None:                        # no measured hit rate for this cell kind: no
                 continue
@@ -373,12 +374,10 @@ class TapLive:
         if code != 0 or not data.get("id"):
             self._event("rejected", code=code, msg=body.get("msg"), sent=sent["req"], **intent)
             self.last_reason = f"rejected: {code} {body.get('msg')}"
-            if code == 2024:                      # "tap config error": the band size changed under the order
-                self.last_at = time.time() + 3    # (the grid re-reads it); skip 3 s, no stop
-                return
-            self.rejects.append(time.time())
-            if sum(1 for t in self.rejects if time.time() - t < 600) >= 2:
-                self._stop(f"2 rejections in 10 minutes (last: {code} {body.get('msg')})")
+            self.rejects.append(time.time())      # a rejection is never a stop: 2024 = the band size changed under
+            self.last_at = time.time() + 3        # the order, 2022 = the column's lead time passed on the way;
+            if code == 2022:                      # the next click gets a larger margin
+                self.lead_extra_ms = min(2000, self.lead_extra_ms + 200)
             return
         odds = float(data.get("odds") or 0)
         booked_t0, booked_lo = data.get("lowerTimeLimit"), data.get("lowerPriceLimit")
