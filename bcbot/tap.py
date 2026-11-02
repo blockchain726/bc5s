@@ -43,6 +43,7 @@ N_POINTS = 100                # the model's price grid
 FEE = 0.03                    # multiplier = (1 - FEE) / P(hit)
 COLS = 6                      # columns evaluated from the next one (k = 0 .. 5)
 ROWS = 6                      # bands either side of the price's band (r = -6 .. +6)
+PAYOUT_FALLBACK = 0.68        # bc.game's payout / the grid label when there is no live book to measure it from
 EV_MIN = 1.35                 # paper-tap the best cell only when its measured EV is at least this: the same bar a
                               # live tap must clear (TAP_MIN_EV 1.15 / the assumed 0.85 payout), so paper rehearses live
 VOL_WINDOW_S = 600            # real volatility from this many seconds of ticks
@@ -293,7 +294,8 @@ class TapAnalyzer:
         self.regime = {"name": "unknown", "factor": 1.0, "trailing": None, "range_bands": None}
         self.paper_path = log_dir / "tap_paper.jsonl"
         self.public_path = log_dir / "tap_public.jsonl"
-        self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0},
+        self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
+                      "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0},
                       "public": {"n": 0, "won": 0, "ret": 0.0, "odds": 0.0, "checked": 0, "agree_tick": 0,
                                  "agree_cross": 0, "odds_checked": 0, "odds_err": 0.0, "by_odds": {}}}
         self.paper_recent: deque = deque(maxlen=12)
@@ -317,6 +319,8 @@ class TapAnalyzer:
         self._reload_at = 0.0
         self._load()
         self.live = TapLive(self, log_dir)
+        if getattr(self, "_rebook", False):
+            self._rebook_paper()                           # the saved paper book was priced at the grid label
 
     # ---------- the Tap tab ----------
 
@@ -692,22 +696,67 @@ class TapAnalyzer:
                 s["ret"] += (c["odds"] if hit else 0.0) - 1.0
                 s["pm"] += c["pm"]
                 s["po"] += c["po"]
-        pay = self.live.ratio() if getattr(self, "live", None) else None    # the server pays ~65% of the label
+        lv = getattr(self, "live", None)
         for c in pdue:
             hit, _ = touched(ticks, c["lo"], c["hi"], c["t0"], c["t1"])
-            real_odds = c["odds"] * pay if pay else c["odds"]                # paper books at the real payout once measured
-            pnl = round((real_odds - 1.0) if hit else -1.0, 4)
-            p = self.stats["paper"]
+            pay = lv.payout(c["k"]) if lv else PAYOUT_FALLBACK        # bc.game pays this fraction of the grid label
+            pnl = round((c["odds"] * pay - 1.0) if hit else -1.0, 4)  # what the server would have paid
+            pnl_label = round((c["odds"] - 1.0) if hit else -1.0, 4)  # what the grid label promised (the old P&L)
+            strict = (c.get("ev_emp") or c["ev"]) * pay >= (lv.min_ev if lv else EV_MIN)   # clears the bar at the
+            p = self.stats["paper"]                                                        # paid odds too
             p["bets"] += 1
             p["wins"] += hit
             p["pnl"] = round(p["pnl"] + pnl, 4)
+            p["pnl_label"] = round(p.get("pnl_label", 0.0) + pnl_label, 4)
+            if strict:
+                ps = self.stats.setdefault("paper_strict", {"bets": 0, "wins": 0, "pnl": 0.0})
+                ps["bets"] += 1
+                ps["wins"] += hit
+                ps["pnl"] = round(ps["pnl"] + pnl, 4)
             rec = {"t": c["created"], "k": c["k"], "r": c["r"], "lo": c["lo"], "hi": c["hi"], "t0": c["t0"],
                    "odds": c["odds"], "odds_src": c.get("odds_src"), "odds_port": c.get("odds_port"),
-                   "po": c["po"], "po_cal": c.get("po_cal"), "ev": c["ev"], "price": c["price"], "hit": hit,
-                   "pnl": pnl, "v": STATS_VERSION}
+                   "po": c["po"], "po_cal": c.get("po_cal"), "ev": c["ev"], "ev_emp": c.get("ev_emp"),
+                   "price": c["price"], "hit": hit, "pnl": pnl, "pnl_label": pnl_label, "pay": round(pay, 3),
+                   "strict": strict, "v": STATS_VERSION}
             self.paper_recent.append(rec)
             with open(self.paper_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
+
+    def _rebook_paper(self) -> None:
+        """Re-price the saved paper book at bc.game's payout: its last `bets` settled picks from the paper log, a win
+        at label x payout instead of the label (the book used to count what the grid promised, not what is paid)."""
+        n = int(self.stats["paper"].get("bets") or 0)
+        try:
+            lines = self.paper_path.read_text(encoding="utf-8").splitlines()[-n:] if n else []
+        except OSError:
+            lines = []
+        lv = getattr(self, "live", None)
+        book = {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
+        strict = {"bets": 0, "wins": 0, "pnl": 0.0}
+        for line in lines:
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("hit") is None or not r.get("odds"):
+                continue
+            hit = bool(r["hit"])
+            pay = lv.payout(r.get("k")) if lv else PAYOUT_FALLBACK
+            pnl = (r["odds"] * pay - 1.0) if hit else -1.0
+            book["bets"] += 1
+            book["wins"] += hit
+            book["pnl"] = round(book["pnl"] + pnl, 4)
+            book["pnl_label"] = round(book["pnl_label"] + ((r["odds"] - 1.0) if hit else -1.0), 4)
+            if (r.get("ev_emp") or r.get("ev") or 0) * pay >= (lv.min_ev if lv else EV_MIN):
+                strict["bets"] += 1
+                strict["wins"] += hit
+                strict["pnl"] = round(strict["pnl"] + pnl, 4)
+        self._rebook = False
+        if book["bets"]:
+            log.info("Tap paper book re-priced at bc.game's payout: %d picks, %+.2f at the grid label -> %+.2f",
+                     book["bets"], book["pnl_label"], book["pnl"])
+            self.stats["paper"] = book
+            self.stats["paper_strict"] = strict
 
     # ---------- drawing on bc.game's Tap page ----------
 
@@ -812,10 +861,10 @@ class TapAnalyzer:
             + ('<span class="mode live">LIVE REAL</span>' if self.live.mode == "real" else
                '<span class="mode paused">DEMO</span>' if self.live.mode == "demo" else '<span class="mode paper">PAPER</span>')
             + '</div>'
-            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at the real payout</span></div>{nxt}</div>'
+            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at what bc.game pays (x{self.live.payout(3):.2f} of the label)</span></div>{nxt}</div>'
             f'<div class="c"><div class="ct"><span>PAPER P&amp;L</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
-            f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr}</div>{open_row}'
+            f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr} &middot; at the grid label {usd(p.get("pnl_label", 0.0))}</div>{open_row}'
             + (f'<div class="sq">{strip}</div>' if strip else "") + '</div>'
             + (f'<div class="c"><div class="ct"><span>LAST TAPS</span><span class="mute">cell &middot; result</span></div>'
                f'{results}</div>' if results else "")
@@ -898,8 +947,14 @@ class TapAnalyzer:
                 log.info("Tap stats: EV / paper tables reset (version %s -> %s); cell hit rates kept",
                          saved.get("v"), STATS_VERSION)
                 self.stats["ev"] = {}
-                self.stats["paper"] = {"bets": 0, "wins": 0, "pnl": 0.0}
+                self.stats["paper"] = {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
+                self.stats["paper_strict"] = {"bets": 0, "wins": 0, "pnl": 0.0}
                 self.paper_recent.clear()
+            elif self.stats["paper"].get("bets") and "pnl_label" not in (saved.get("paper") or {}):
+                if hasattr(self, "live"):                  # an old book priced at the grid label: re-price its picks
+                    self._rebook_paper()
+                else:
+                    self._rebook = True
         except (OSError, ValueError):
             pass
         self.stats["v"] = STATS_VERSION
@@ -952,7 +1007,8 @@ class TapAnalyzer:
             "sym_cfg": self.sym_cfg, "market_open": self.market_open(), "live": self.live.summary(),
             "regime": self.regime,
             "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": self.ev_bar(),
-                      "open": len(self.paper_pending)},
+                      "open": len(self.paper_pending), "payout": self.live.payout_table(), "min_ev": self.live.min_ev,
+                      "strict": self.stats.get("paper_strict")},
             "public": {**pub, "recent": list(self.public_recent)[::-1],
                        "odds_ratio": float(np.median(self.odds_ratio)) if self.odds_ratio else None},
         }

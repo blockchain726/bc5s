@@ -88,6 +88,13 @@ def _flag(name: str, default: str) -> str:
     return (os.getenv(name) or default).strip()
 
 
+# bc.game's server multiplier as a fraction of the grid label, by columns ahead: measured on 858 real orders
+# (2026-11-01).  Used to book paper wins at what the server would have paid; the picker's switch is TAP_USE_RATIO.
+PAYOUT_DEFAULT = {2: 0.64, 3: 0.68, 4: 0.70}
+PAYOUT_OTHER = 0.68
+PAYOUT_MIN_N = 20             # settled real orders of a kind before their own median replaces the default
+
+
 class TapLive:
     def __init__(self, analyzer, log_dir: Path):
         self.a = analyzer
@@ -188,6 +195,22 @@ class TapLive:
             return None
         r = [x for x in self.st["ratios"][-20:] if x and x > 0]
         return statistics.median(r) if len(r) >= self.ratio_min_n else None
+
+    def payout(self, k=None) -> float:
+        """What bc.game's server pays as a fraction of the grid label for a cell k columns ahead: the median over our
+        settled real orders of that kind (PAYOUT_MIN_N or more), else over all of them, else the measured default.
+        Books paper wins at the real payout; independent of use_ratio, which is the picker's switch."""
+        settled = [o for o in self.st["orders"].values() if o.get("ratio") and o.get("result") in ("WIN", "LOSS")]
+        if k is not None:
+            mine = [o["ratio"] for o in settled if o.get("k") == k]
+            if len(mine) >= PAYOUT_MIN_N:
+                return round(statistics.median(mine), 3)
+        if len(settled) >= PAYOUT_MIN_N:
+            return round(statistics.median(o["ratio"] for o in settled), 3)
+        return PAYOUT_DEFAULT.get(k, PAYOUT_OTHER)
+
+    def payout_table(self) -> dict:
+        return {str(k): self.payout(k) for k in (2, 3, 4)}
 
     def open_orders(self) -> list:
         return [o for o in self.st["orders"].values() if o.get("result") is None]
@@ -525,6 +548,6 @@ class TapLive:
         return {"mode": self.mode, "stake": self.stake, "budget": self.budget, "min_ev": self.min_ev,
                 "ratio_boot": self.ratio_boot, "ratio_min_n": self.ratio_min_n, "max_open": self.max_open,
                 "stopped": self.st["stopped"], "paused_s": max(0, round(self.paused_until - time.time())),
-                "ratio": self.ratio(), "ratios_n": len(self.st["ratios"]), "real": self.st["real"], "demo": self.st["demo"],
+                "payout": self.payout_table(), "ratio": self.ratio(), "ratios_n": len(self.st["ratios"]), "real": self.st["real"], "demo": self.st["demo"],
                 "open": len(self.open_orders()), "last_reason": self.last_reason, "panel": self.panel,
                 "recent": list(self.recent)[::-1]}

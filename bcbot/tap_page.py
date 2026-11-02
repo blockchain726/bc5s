@@ -126,13 +126,17 @@ function ev(rows) {
 }
 function paper(p) {
   const wr = p.bets ? p.wins / p.bets : null;
+  const pay = p.payout || {};
+  const payTxt = ['2', '3', '4'].filter(k => pay[k] != null).map(k => `+${k}c &times;${pay[k].toFixed(2)}`).join(' ');
+  const s = p.strict || {};
   document.getElementById('paper').innerHTML =
-    `<div class="ct"><span>PAPER TAPS</span><span class="mute">$1 on the best-EV tappable cell when EV &ge; ${p.ev_min}</span></div>` +
-    `<div class="row"><span class="mute">P&amp;L</span><span class="mute">taps &middot; won</span></div>` +
+    `<div class="ct"><span>PAPER TAPS</span><span class="mute">$1 on the best-EV tappable cell when EV &ge; ${p.ev_min}; a win pays what bc.game's server really pays (${payTxt} of the label, measured on our real orders)</span></div>` +
+    `<div class="row"><span class="mute">P&amp;L at bc.game's payout</span><span class="mute">taps &middot; won</span></div>` +
     `<div class="row"><span class="big ${p.pnl >= 0 ? 'up' : 'down'}">${usd(p.pnl)}</span><span class="big">${p.bets} &middot; ${p.wins}</span></div>` +
-    `<div class="mute">won ${pct(wr)}${p.open ? ` &middot; open ${p.open} tap${p.open > 1 ? 's' : ''} ($${p.open} at risk, wallet view ${usd(p.pnl - p.open)})` : ''}</div>` +
+    `<div class="mute">won ${pct(wr)} &middot; at the grid label it would read ${usd(p.pnl_label || 0)} (the old P&amp;L)${p.open ? ` &middot; open ${p.open} tap${p.open > 1 ? 's' : ''} ($${p.open} at risk)` : ''}</div>` +
+    `<div class="mute">picks that also clear the bar at the paid odds (EV &times; payout &ge; ${p.min_ev}): <b class="${(s.pnl || 0) >= 0 ? 'up' : 'down'}">${usd(s.pnl || 0)}</b> on ${s.bets || 0} taps, won ${s.wins || 0}</div>` +
     (p.recent || []).slice(0, 8).map(r => `<div class="res ${r.hit ? 'w' : 'l'}"><span>+${r.k} col ${r.r >= 0 ? '+' : ''}${r.r} band</span>` +
-      `<span>×${r.odds.toFixed(2)}</span><span class="mute">EV ${r.ev.toFixed(2)}</span><b>${r.hit ? 'HIT' : 'MISS'}</b>` +
+      `<span>×${r.odds.toFixed(2)}${r.pay ? ` &rarr; ×${(r.odds * r.pay).toFixed(2)}` : ''}</span><span class="mute">EV ${r.ev.toFixed(2)}</span><b>${r.hit ? 'HIT' : 'MISS'}</b>` +
       `<span class="m">${usd(r.pnl)}</span></div>`).join('');
 }
 function pub(p) {
