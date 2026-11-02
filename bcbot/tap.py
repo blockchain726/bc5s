@@ -610,7 +610,9 @@ class TapAnalyzer:
                 po = p_hit(cr, now, lo, lo + step, t0, t0 + gap)
                 o_port = odds(pm, max_odds)
                 o_bc = bc_odds.get((t0, round(lo, 2)))
-                o = o_bc if o_bc else o_port
+                if o_bc and o_port and (o_bc > 2.2 * o_port or o_bc < o_port / 2.2):
+                    o_bc = None                               # a label that can't be this cell's (read across a band
+                o = o_bc if o_bc else o_port                  # line while the price moved): treat as unlabelled
                 po_cal = min(0.999, po * calib.get((k, r), 1.0))
                 cells.append({"k": k, "r": r, "t0": t0, "t1": t0 + gap, "lo": lo, "hi": lo + step, "step": step,
                               "odds": round(o, 3), "odds_port": round(o_port, 3), "odds_src": "bc" if o_bc else "port",
