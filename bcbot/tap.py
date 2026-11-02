@@ -510,6 +510,15 @@ class TapAnalyzer:
             self.debug_texts = d["texts"]
         return d
 
+    def ev_bar(self) -> float:
+        """The EV (measured hit rate x label) a cell must clear: the live tap's bar at the server's real payout
+        (TAP_MIN_EV / the measured server-to-label ratio, or the assumed one before it is measured).  Paper taps
+        use the same bar, so the paper boxes on the page show exactly where a real tap goes."""
+        lv = getattr(self, "live", None)
+        if lv is None:
+            return EV_MIN
+        return round(lv.min_ev / (lv.ratio() or lv.ratio_boot), 3)
+
     def _regime(self, step: float) -> dict:
         """The regime now: the trailing hit rate of the last 60 settled current-band virtual taps and the 60 s price
         range in band units -> a factor on the measured hit rates (REGIME_FACTOR).  1.0 while unknown."""
@@ -617,7 +626,8 @@ class TapAnalyzer:
             if c["tappable"] and c["ev_emp"] is not None and (best is None or c["ev_emp"] > best["ev_emp"]):
                 best = c                                     # only cell kinds measured at this band size
         grid["pick"] = None
-        if best is not None and best["ev_emp"] >= EV_MIN and best["odds_src"] == "bc":   # only at bc.game's label
+        grid["ev_bar"] = self.ev_bar()
+        if best is not None and best["ev_emp"] >= grid["ev_bar"] and best["odds_src"] == "bc":   # the live bar
             grid["pick"] = (best["k"], best["r"])
             self.paper_pending.append(dict(best, created=now, price=price))
         self.grid = grid
@@ -741,7 +751,7 @@ class TapAnalyzer:
             best = max((c for c in (self.grid or {}).get("cells", []) if c.get("tappable")),
                        key=lambda c: c["ev"], default=None)
             nxt = ('<div class="big mute" style="font-size:20px">NO TAP</div><div class="mute">'
-                   + (f'best cell EV {best["ev"]:.2f} &lt; {EV_MIN} this column' if best else 'waiting for the grid')
+                   + (f'best cell EV {best.get("ev_emp") or 0:.2f} &lt; {self.ev_bar()} this column' if best else 'waiting for the grid')
                    + '</div>')
         wr = f' &middot; won {p["wins"] / p["bets"]:.1%}' if p["bets"] else ""
         lv = self.live
@@ -790,7 +800,7 @@ class TapAnalyzer:
         return (
             f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; TAP {SYMBOL}</span>'
             f'<span class="mode paper">PAPER</span></div>'
-            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {EV_MIN}</span></div>{nxt}</div>'
+            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar)</span></div>{nxt}</div>'
             f'<div class="c"><div class="ct"><span>PAPER P&amp;L</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
             f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr}</div>{open_row}'
@@ -929,7 +939,7 @@ class TapAnalyzer:
             "debug_texts": self.debug_texts,
             "sym_cfg": self.sym_cfg, "market_open": self.market_open(), "live": self.live.summary(),
             "regime": self.regime,
-            "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": EV_MIN,
+            "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": self.ev_bar(),
                       "open": len(self.paper_pending)},
             "public": {**pub, "recent": list(self.public_recent)[::-1],
                        "odds_ratio": float(np.median(self.odds_ratio)) if self.odds_ratio else None},
