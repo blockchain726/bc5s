@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 
 def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Application:
-    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run", "ladder", "tap_live", "tap_stake")
+    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run", "ladder", "tap_live", "tap_stake", "tap_clear")
 
     def money_auth(request: web.Request) -> web.Response | None:
         """The token check for anything that can arm, disarm or spend: refused without a configured token."""
@@ -103,12 +103,14 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                 auto.reset_run(int(body.get("ack_run", -1)), str(body.get("reason", "")), who="api")
             if "ladder" in body and not body.get("arm"):             # switch the ladder while armed
                 auto.set_ladder(bool(body["ladder"]), who="api")
-            if "tap_live" in body or "tap_stake" in body:             # live taps: mode and stake (Tap page)
+            if "tap_live" in body or "tap_stake" in body or body.get("tap_clear"):   # live taps (Tap page)
                 if tap is None:
                     raise TradeError("the Tap analyzer is not running (start without --no-tap)")
                 try:
                     if "tap_stake" in body:
                         tap.live.set_stake(float(body["tap_stake"]), who="api")
+                    if body.get("tap_clear"):
+                        tap.live.clear()                              # a technical stop (not a budget stop)
                     if "tap_live" in body:
                         tap.live.set_mode(str(body["tap_live"]), who="api")
                 except ValueError as e:

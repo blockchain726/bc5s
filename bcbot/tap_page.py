@@ -33,6 +33,7 @@ th{color:#8793a2;font-weight:normal}td.l,th.l{text-align:left}
     <span class="mute">mode</span>
     <button data-tapmode="off">OFF</button><button data-tapmode="demo" title="the page's DEMO account: real server multipliers, no money">DEMO</button>
     <button data-tapmode="real" class="liveb" title="account money">REAL</button>
+    <button id="tapclear" title="clear a technical stop (rejections, an unanswered order); a budget stop stays">clear stop</button>
     <span class="mute" style="margin-left:10px">stake $</span><input id="tapstake" type="number" step="0.1" min="0.1" max="5" style="width:60px;font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:4px 6px">
     <button id="setstake">set</button>
     <input type="password" id="tok" placeholder="API token (from .env)" title="the API_TOKEN from .env; kept in this browser" style="margin-left:10px;font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:4px 8px;width:150px">
@@ -179,6 +180,10 @@ document.querySelectorAll('[data-tapmode]').forEach(b => b.onclick = async () =>
   const res = await post({tap_live: mode});
   result(res.ok, res.ok ? `Tap live ${mode.toUpperCase()}` : 'not changed: ' + res.err);
 });
+document.getElementById('tapclear').onclick = async () => {
+  const res = await post({tap_clear: true});
+  result(res.ok, res.ok ? 'Tap stop cleared' : 'not cleared: ' + res.err);
+};
 document.getElementById('setstake').onclick = async () => {
   const res = await post({tap_stake: parseFloat(document.getElementById('tapstake').value)});
   result(res.ok, res.ok ? `stake $${res.d.tap_live.stake} per tap` : 'not changed: ' + res.err);

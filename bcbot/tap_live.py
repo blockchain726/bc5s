@@ -336,9 +336,12 @@ class TapLive:
         code = body.get("code")
         data = body.get("data") if isinstance(body.get("data"), dict) else {}
         if code != 0 or not data.get("id"):
-            self.rejects.append(time.time())
             self._event("rejected", code=code, msg=body.get("msg"), sent=sent["req"], **intent)
             self.last_reason = f"rejected: {code} {body.get('msg')}"
+            if code == 2024:                      # "tap config error": the band size changed under the order
+                self.last_at = time.time() + 3    # (the grid re-reads it); skip 3 s, no stop
+                return
+            self.rejects.append(time.time())
             if sum(1 for t in self.rejects if time.time() - t < 600) >= 2:
                 self._stop(f"2 rejections in 10 minutes (last: {code} {body.get('msg')})")
             return
