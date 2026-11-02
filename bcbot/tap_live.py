@@ -63,8 +63,10 @@ CLICK_POINT_JS = r"""(d) => {
   const c = T[0][1][2], r = c.getBoundingClientRect();
   if (!(x > r.left + 2 && x < r.right - 2 && y > r.top + 2 && y < r.bottom - 2)) return {err: 'off chart', x, y};
   const top = document.elementFromPoint(x, y);
-  return {x, y, onCanvas: top === c || (top && top.tagName === 'CANVAS'),
-          cover: top && top.tagName !== 'CANVAS' ? (top.className || top.tagName).toString().slice(0, 60) : null};
+  const chart = c.parentElement;                      // the page's own chart box: its SVG / canvas layers are fine
+  const ok = top === c || (top && (top.tagName === 'CANVAS' || (chart && chart.contains(top))));
+  return {x, y, onCanvas: ok,
+          cover: !ok && top ? (top.id || top.getAttribute('class') || top.tagName).toString().slice(0, 60) : null};
 }"""
 
 # the order panel: the amount box, the account (a demo account shows "(Demo)" next to its balance), the currency
@@ -215,6 +217,8 @@ class TapLive:
         best = None
         for c in g.get("cells", []):
             if not c.get("tappable") or c.get("odds_src") != "bc" or c["t0"] - now_ms < MIN_AHEAD_MS + 300:
+                continue
+            if not c.get("cal") and abs(c.get("r", 9)) > 1:   # far cell without this band's calibration: no
                 continue
             if (c["t0"], c["lo"]) in taken:
                 continue

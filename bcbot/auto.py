@@ -397,6 +397,8 @@ class AutoTrader:
         self.armed_at = 0.0
         self.rearm_grant = False           # beyond the run limit: a re-arm allows exactly one real order
         self.ladder_forced = False         # 'live arm ... ladder': the compensate ladder on although the gate is closed
+        self.arm_live_pnl = 0.0            # real P&L since the current arming (the panel's "this run")
+        self.arm_orders = 0
         self.rearms = 0
         self.real_run = 0                  # real losses in a row; only a real WIN resets it, nothing else
         self.real_run_longest_today = 0
@@ -645,6 +647,8 @@ class AutoTrader:
         self.state, self.armed_at, self.stop_reason, self.tech_stop = "ARMED", time.time(), None, None
         self.rearm_grant = grant
         self.ladder_forced = bool(ladder) and not gate["open"]
+        self.arm_live_pnl, self.arm_orders = 0.0, 0           # a fresh P&L view from this arming
+        self._restart_test()                                   # the paper P&L "since" marker too
         self.rearms += int(grant)
         self._save_state()
         self._event("arm", who=who, ack_run=int(ack_run), grant=grant, force=force, gate_open=gate["open"],
@@ -1437,6 +1441,8 @@ class AutoTrader:
         self._roll_day()
         self.day_live_pnl += rec["live_pnl"]
         self.campaign_pnl += rec["live_pnl"]
+        self.arm_live_pnl += rec["live_pnl"]
+        self.arm_orders += 1
         if result == "LOSS":
             self.real_run += 1
             self.real_run_longest_today = max(self.real_run_longest_today, self.real_run)
@@ -2000,7 +2006,8 @@ class AutoTrader:
             + (f' &middot; won {won / bets:.1%}' if bets else "") + '</div>'
             f'<div class="ph" style="margin-top:3px">next bet ${amt(nxt_after)} &middot; losses in a row {step} &middot; '
             f'run lost ${amt(run_lost)} &middot; longest {longest}</div>'
-            f'<div class="mute">{real} &middot; real today {usd(self.day_live_pnl)} (limit -${self.cfg.auto_daily_loss_usd:g})</div>'
+            f'<div class="mute">{real} &middot; this run {usd(self.arm_live_pnl)} ({self.arm_orders} orders) &middot; '
+            f'real today {usd(self.day_live_pnl)} (limit -${self.cfg.auto_daily_loss_usd:g})</div>'
             f'{safety}'
             f'<div class="sq" title="our last calls, newest left">{strip}</div></div>')
 
@@ -2089,6 +2096,7 @@ class AutoTrader:
             "real_run_longest_today": self.real_run_longest_today,
             "attempts_today": self.attempts_today, "max_real_bets_day": c.auto_max_real_bets_day,
             "today_live_pnl": round(self.day_live_pnl, 4), "daily_loss_usd": c.auto_daily_loss_usd,
+            "arm_live_pnl": round(self.arm_live_pnl, 4), "arm_orders": self.arm_orders,
             "budget_left": round(self.budget_left(), 4),
             "campaign_pnl": round(self.campaign_pnl, 4), "campaign_since": self.campaign_since or None,
             "run_reset_at": self.run_reset_at or None,

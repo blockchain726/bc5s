@@ -47,3 +47,13 @@ def test_real_taps_bootstrap_with_the_assumed_ratio(tmp_path, monkeypatch):
     assert cell and abs(cell["ev_exp"] - 1.19) < 1e-6 and cell["ratio_used"] == 0.85
     lv.st["ratios"] = [0.5] * 5                             # measured: the server pays half the label
     assert lv.ratio() == 0.5 and lv._choose(1_000_000.0) is None
+
+
+def test_live_skips_uncalibrated_far_cells(tmp_path, monkeypatch):
+    monkeypatch.setenv("TAP_LIVE", "real")
+    lv = TapLive(FakeAnalyzer(), tmp_path)
+    far = dict(lv.a.grid["cells"][0], r=3, lo=70015.0, hi=70020.0, odds=8.0, po_cal=0.3)   # EV 2.0 but far, uncalibrated
+    lv.a.grid["cells"] = [far]
+    assert lv._choose(1_000_000.0) is None
+    far["cal"] = True                                        # calibrated at this band size: allowed
+    assert lv._choose(1_000_000.0) is not None

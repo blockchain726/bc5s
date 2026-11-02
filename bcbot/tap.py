@@ -500,17 +500,13 @@ class TapAnalyzer:
         return d
 
     def _calibration(self, step: float) -> dict:
-        """(k, r) -> realized hit rate / the model's P(hit), from the virtual taps settled so far: for this band size
-        when it has enough, else over all band sizes.  Clipped to [0.2, 1.5]."""
+        """(k, r) -> realized hit rate / the model's P(hit), from the virtual taps settled so far at THIS band size
+        (a $2-band ratio does not carry over to $5 bands: it made far cells look good).  Clipped to [0.2, 1.5]."""
         out = {}
         for key, s in self.stats.get("cells_step", {}).items():
             st, k, r = key.split(",")
             if float(st) == step and s["n"] >= CALIB_MIN_N and s["po"] > 0:
                 out[(int(k), int(r))] = max(0.2, min(1.5, s["hit"] / s["po"]))
-        for key, s in self.stats["cells"].items():
-            k, r = map(int, key.split(","))
-            if (k, r) not in out and s["n"] >= CALIB_MIN_N and s["po"] > 0:
-                out[(k, r)] = max(0.2, min(1.5, s["hit"] / s["po"]))
         return out
 
     async def _snapshot(self) -> None:
@@ -561,8 +557,8 @@ class TapAnalyzer:
         for c in grid["cells"]:
             c["tappable"] = c["k"] in tappable
             self.pending.append(dict(c, created=now))
-            if c["tappable"] and (best is None or c["ev"] > best["ev"]):
-                best = c
+            if c["tappable"] and (c["cal"] or abs(c["r"]) <= 1) and (best is None or c["ev"] > best["ev"]):
+                best = c                                     # far cells only once calibrated at this band size
         grid["pick"] = None
         if best is not None and best["ev"] >= EV_MIN and best["odds_src"] == "bc":   # only at bc.game's real price
             grid["pick"] = (best["k"], best["r"])
@@ -589,7 +585,7 @@ class TapAnalyzer:
                 cells.append({"k": k, "r": r, "t0": t0, "t1": t0 + gap, "lo": lo, "hi": lo + step, "step": step,
                               "odds": round(o, 3), "odds_port": round(o_port, 3), "odds_src": "bc" if o_bc else "port",
                               "pm": round(pm, 5), "po": round(po, 5), "po_cal": round(po_cal, 5),
-                              "ev": round(po_cal * o, 4)})
+                              "ev": round(po_cal * o, 4), "cal": (k, r) in calib})
         return {"now": now, "price": price, "cols": cols, "rows": rows, "cells": cells, "step": step,
                 "bc_cells": sum(1 for c in cells if c["odds_src"] == "bc")}
 

@@ -316,7 +316,8 @@ function safetyLine(d) {
   const st = d.state === 'ARMED' ? '<b style="color:#ff5468">LIVE (armed)</b>' :
              d.state === 'STOPPED' ? `<b style="color:#f59e0b">STOPPED</b> (${d.stop_reason || ''})` : 'paper';
   document.getElementById('safety').innerHTML =
-    `real orders: ${st} &middot; real losses in a row <b>${d.real_run}</b>/${d.max_real_run} (a real WIN or the reset button resets it) ` +
+    `real orders: ${st} &middot; this run <b style="color:${(d.arm_live_pnl || 0) >= 0 ? '#22d27a' : '#ff5468'}">${(d.arm_live_pnl || 0) >= 0 ? '+' : ''}${(d.arm_live_pnl || 0).toFixed(2)}</b> (${d.arm_orders || 0} orders) ` +
+    `&middot; real losses in a row <b>${d.real_run}</b>/${d.max_real_run} (a real WIN or the reset button resets it) ` +
     `&middot; orders today ${d.attempts_today}/${d.max_real_bets_day} &middot; budget left $${(d.budget_left || 0).toFixed(2)} ` +
     `&middot; campaign ${(d.campaign_pnl || 0) >= 0 ? '+' : ''}${(d.campaign_pnl || 0).toFixed(2)} ` +
     `&middot; balance ${d.balance_usd != null ? '$' + d.balance_usd.toFixed(2) : '–'} ` +
