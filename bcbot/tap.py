@@ -630,6 +630,9 @@ class TapAnalyzer:
         taken_cols = {c["t0"] for c in self.paper_pending}      # one paper tap per column, like the live tap
         if best is not None and best["t0"] in taken_cols:
             best = None
+        lv = getattr(self, "live", None)                        # with live taps on, a paper box is placed only when
+        if best is not None and lv is not None and lv.mode != "off" and lv._why_not(now) is not None:
+            best = None                                         # the live tap is free to click it (spacing, open taps)
         if best is not None and best["ev_emp"] >= grid["ev_bar"] and best["odds_src"] == "bc":   # the live bar
             grid["pick"] = (best["k"], best["r"])
             self.paper_pending.append(dict(best, created=now, price=price))
