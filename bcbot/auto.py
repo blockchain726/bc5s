@@ -18,6 +18,7 @@ import bisect
 import calendar
 import html
 import json
+import os
 import logging
 import math
 import time
@@ -398,6 +399,7 @@ class AutoTrader:
         self.rearm_grant = False           # beyond the run limit: a re-arm allows exactly one real order
         self.ladder_forced = False         # 'live arm ... ladder': the compensate ladder on although the gate is closed
         self.arm_live_pnl = 0.0            # real P&L since the current arming (the panel's "this run")
+        self.other_money_active = lambda: os.getenv("TAP_LIVE", "off").strip().lower() != "off"   # Tap live on?
         self.arm_orders = 0
         self.rearms = 0
         self.real_run = 0                  # real losses in a row; only a real WIN resets it, nothing else
@@ -586,6 +588,10 @@ class AutoTrader:
             log.warning("real losses in a row: %d from the log, %d in the state file; keeping the larger",
                         self.real_run, saved)
             self.real_run = max(self.real_run, int(saved))
+        if self.tech_stop == "mismatch" and self.other_money_active():
+            log.warning("dropping the saved stop %r: Tap live moves the same balance (the balance check is only a "
+                        "note while it is on)", self.stop_reason)
+            self.tech_stop, self.stop_reason = None, None
         if self.tech_stop or self.unknown:
             self.state = "STOPPED"
             if not self.tech_stop:
@@ -1503,9 +1509,12 @@ class AutoTrader:
                 self._event("reconciled", rid=rec["id"], delta=round(delta, 6), expected=round(expected, 6))
                 return
         self._event("mismatch", rid=rec["id"], delta=delta, expected=round(expected, 6), currency=before[1])
-        if self.armed:
+        if self.armed and not self.other_money_active():
             self._hard_stop(f"balance moved {delta if delta is None else round(delta, 4)} {before[1]} but the "
                             f"order's result was {expected:+.4f}", tech="mismatch")
+        elif self.armed:                          # Tap live moves the same balance: the check can't tell them apart
+            log.warning("round %s: balance moved %s but the order's result was %+.4f (Tap live is on, so the balance "
+                        "check is only a note)", rec["id"], delta if delta is None else round(delta, 4), expected)
 
     def _pnl(self, rec: dict, side: str | None, diluted: bool = False) -> float:
         """$-stake P&L of calling `side` in a settled round: that side's page payout when it was read (the called
