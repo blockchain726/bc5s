@@ -218,14 +218,14 @@ class TapLive:
     def _choose(self, now_ms: float) -> dict | None:
         g = self.a.grid or {}
         ratio = self.ratio() or self.ratio_boot
-        taken = {(o["t0"], o["lo"]) for o in self.st["orders"].values()}
+        taken = {o["t0"] for o in self.st["orders"].values()}          # one live tap per column
         best = None
         for c in g.get("cells", []):
             if not c.get("tappable") or c.get("odds_src") != "bc" or c["t0"] - now_ms < MIN_AHEAD_MS + 300:
                 continue
             if c.get("p_emp") is None:                        # no measured hit rate for this cell kind: no
                 continue
-            if (c["t0"], c["lo"]) in taken:
+            if c["t0"] in taken:
                 continue
             ev = c["p_emp"] * c["odds"] * ratio               # measured hit rate x label x server/label ratio
             if ev >= self.min_ev and (best is None or ev > best["ev_exp"]):
