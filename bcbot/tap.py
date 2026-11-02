@@ -43,7 +43,8 @@ N_POINTS = 100                # the model's price grid
 FEE = 0.03                    # multiplier = (1 - FEE) / P(hit)
 COLS = 6                      # columns evaluated from the next one (k = 0 .. 5)
 ROWS = 6                      # bands either side of the price's band (r = -6 .. +6)
-EV_MIN = 1.05                 # paper-tap the best cell only when our EV is at least this
+EV_MIN = 1.35                 # paper-tap the best cell only when its measured EV is at least this: the same bar a
+                              # live tap must clear (TAP_MIN_EV 1.15 / the assumed 0.85 payout), so paper rehearses live
 VOL_WINDOW_S = 600            # real volatility from this many seconds of ticks
 EV_BUCKETS = (0.0, 0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.5, float("inf"))
 ODDS_BUCKETS = (1.0, 1.5, 2.0, 3.0, 5.0, 7.99, float("inf"))
