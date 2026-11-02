@@ -51,7 +51,9 @@ ODDS_BUCKETS = (1.0, 1.5, 2.0, 3.0, 5.0, 7.99, float("inf"))
 STEPS_USD = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0)   # band sizes bc.game uses; the one on screen is inferred
 ODDS_READ_MS = 1000           # bc.game's multiplier labels drawn within this many ms are the grid on screen now
 CALIB_MIN_N = 1000
-REGIME_FACTOR = {("calm", "hot"): 1.20, ("calm", "cold"): 1.04, ("wild", "hot"): 0.94, ("wild", "cold"): 0.76}
+REGIME_FACTOR = {("calm", "hot"): 1.20, ("calm", "cold"): 1.04, ("wild", "hot"): 0.94, ("wild", "cold"): 0.0}
+# wild+cold is 0: at the server's real payout (~70% of the label) that regime lost in history (41% hits) and
+# tonight (32%), so no tap is placed in it, whatever the label says
 REGIME_RANGE_BANDS = 4.0      # 60 s price range in band units: below = calm
 REGIME_HOT = 0.45             # trailing hit rate of the last 60 settled current-band taps: at least = hot
 TRAILING_PRIOR_N = 30         # the long-run rate counts as this many taps against the trailing 60 (shrinkage)            # virtual taps of a cell kind before its realized hit rate calibrates the model
