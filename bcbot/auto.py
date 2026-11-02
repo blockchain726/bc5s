@@ -399,7 +399,8 @@ class AutoTrader:
         self.rearm_grant = False           # beyond the run limit: a re-arm allows exactly one real order
         self.ladder_forced = False         # 'live arm ... ladder': the compensate ladder on although the gate is closed
         self.arm_live_pnl = 0.0            # real P&L since the current arming (the panel's "this run")
-        self.other_money_active = lambda: os.getenv("TAP_LIVE", "off").strip().lower() != "off"   # Tap live on?
+        self.other_money_active = lambda: (os.getenv("TAP_LIVE", "off").strip().lower() != "off"     # Tap live on,
+                                           or os.getenv("AUTO_BALANCE_STOP", "0").strip() != "1")  # or the check is off
         self.arm_orders = 0
         self.rearms = 0
         self.real_run = 0                  # real losses in a row; only a real WIN resets it, nothing else
