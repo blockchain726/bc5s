@@ -136,12 +136,17 @@ class TapLive:
             pass
 
     def _save(self) -> None:
-        try:
-            tmp = self.state_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.st), encoding="utf-8")
-            os.replace(tmp, self.state_path)
-        except OSError as e:
-            log.warning("Tap live state: %r", e)
+        err = None
+        for attempt in range(8):                  # Windows: a scanner or an editor may hold the file for a moment
+            try:
+                tmp = self.state_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.st), encoding="utf-8")
+                os.replace(tmp, self.state_path)
+                return
+            except OSError as e:
+                err = e
+                time.sleep(0.05 * (attempt + 1))
+        log.warning("Tap live state: %r (kept in memory; the next save retries)", err)
 
     def _event(self, event: str, **kw) -> None:
         rec = {"utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()), "event": event, "mode": self.mode, **kw}
