@@ -218,11 +218,11 @@ class TapLive:
         for c in g.get("cells", []):
             if not c.get("tappable") or c.get("odds_src") != "bc" or c["t0"] - now_ms < MIN_AHEAD_MS + 300:
                 continue
-            if not c.get("cal") and abs(c.get("r", 9)) > 1:   # far cell without this band's calibration: no
+            if c.get("p_emp") is None:                        # no measured hit rate for this cell kind: no
                 continue
             if (c["t0"], c["lo"]) in taken:
                 continue
-            ev = c["po_cal"] * c["odds"] * ratio
+            ev = c["p_emp"] * c["odds"] * ratio               # measured hit rate x label x server/label ratio
             if ev >= self.min_ev and (best is None or ev > best["ev_exp"]):
                 best = dict(c, ev_exp=round(ev, 4), ratio_used=round(ratio, 4))
         return best

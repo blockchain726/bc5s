@@ -10,7 +10,7 @@ class FakeAnalyzer:
         self.connected = True
         self.bc_read = {"n": 10}
         self.grid = {"cells": [{"t0": 1_000_000.0 + MIN_AHEAD_MS + 2000, "lo": 70000.0, "hi": 70010.0, "k": 2, "r": 0,
-                                "tappable": True, "odds_src": "bc", "odds": 2.0, "po_cal": 0.7}]}
+                                "tappable": True, "odds_src": "bc", "odds": 2.0, "po_cal": 0.7, "p_emp": 0.7}]}
         self.page = None
 
     def market_open(self):
@@ -52,8 +52,10 @@ def test_real_taps_bootstrap_with_the_assumed_ratio(tmp_path, monkeypatch):
 def test_live_skips_uncalibrated_far_cells(tmp_path, monkeypatch):
     monkeypatch.setenv("TAP_LIVE", "real")
     lv = TapLive(FakeAnalyzer(), tmp_path)
-    far = dict(lv.a.grid["cells"][0], r=3, lo=70015.0, hi=70020.0, odds=8.0, po_cal=0.3)   # EV 2.0 but far, uncalibrated
+    far = dict(lv.a.grid["cells"][0], r=3, lo=70015.0, hi=70020.0, odds=8.0, po_cal=0.3, p_emp=None)   # not measured
     lv.a.grid["cells"] = [far]
     assert lv._choose(1_000_000.0) is None
-    far["cal"] = True                                        # calibrated at this band size: allowed
+    far["p_emp"] = 0.05                                      # measured: hits 5% -> EV 0.4 x 0.85: no
+    assert lv._choose(1_000_000.0) is None
+    far["p_emp"] = 0.3                                       # measured 30% at x8 -> EV 2.0: yes
     assert lv._choose(1_000_000.0) is not None

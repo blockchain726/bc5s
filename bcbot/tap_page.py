@@ -50,7 +50,8 @@ button.on{background:#2f6fd6;border-color:#2f6fd6;color:#fff}button.liveb.on{bac
       <table class="grid" id="grid"></table>
       <div class="note">Rows: price bands ($10). Columns: the 2 s windows starting next; dimmed ones can't be tapped now.
       A tap wins if the price touches its band inside its window. Multiplier = bc.game's model (0.97 / its P(hit),
-      max &times;8). EV = our P(hit), from the price's real recent volatility, &times; the multiplier.</div></div>
+      max &times;8). EV = the MEASURED hit rate of that cell kind at this band size (virtual taps settled on the
+      real price, 1,000+ each) &times; the multiplier; cell kinds without enough measurements are never picked.</div></div>
     <div class="c"><div class="ct"><span>EVERY CELL TAPPED VIRTUALLY</span><span class="mute">real return per $1
       &middot; settled on the real price</span></div>
       <table id="cells"></table>

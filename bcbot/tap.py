@@ -499,6 +499,16 @@ class TapAnalyzer:
             self.debug_texts = d["texts"]
         return d
 
+    def _hit_rates(self, step: float) -> dict:
+        """(k, r) -> the realized hit rate of that cell kind at THIS band size, from the virtual taps settled on the
+        real price (n >= CALIB_MIN_N).  This is what the picker trusts: not the model, not a corrected model."""
+        out = {}
+        for key, s in self.stats.get("cells_step", {}).items():
+            st, k, r = key.split(",")
+            if float(st) == step and s["n"] >= CALIB_MIN_N:
+                out[(int(k), int(r))] = s["hit"] / s["n"]
+        return out
+
     def _calibration(self, step: float) -> dict:
         """(k, r) -> realized hit rate / the model's P(hit), from the virtual taps settled so far at THIS band size
         (a $2-band ratio does not carry over to $5 bands: it made far cells look good).  Clipped to [0.2, 1.5]."""
@@ -544,9 +554,10 @@ class TapAnalyzer:
                                       for it in bc["items"][:120]]}
         self.bc_odds = bc_odds
         self.calib = self._calibration(step)
+        self.hits = self._hit_rates(step)
         grid = await asyncio.to_thread(self._grid, now, price, gap, step, self.cfg["volatility"],
                                        self.vol_real or self.cfg["volatility"], self.cfg["maxOdds"], bc_odds,
-                                       self.calib)
+                                       self.calib, self.hits)
         labeled = sorted({t0 for (t0, _lo) in bc_odds})
         grid["bc_cols"] = labeled
         tappable = {k for k, t0 in enumerate(grid["cols"]) if t0 in labeled and t0 - now >= MIN_AHEAD_MS}
@@ -557,17 +568,17 @@ class TapAnalyzer:
         for c in grid["cells"]:
             c["tappable"] = c["k"] in tappable
             self.pending.append(dict(c, created=now))
-            if c["tappable"] and (c["cal"] or abs(c["r"]) <= 1) and (best is None or c["ev"] > best["ev"]):
-                best = c                                     # far cells only once calibrated at this band size
+            if c["tappable"] and c["ev_emp"] is not None and (best is None or c["ev_emp"] > best["ev_emp"]):
+                best = c                                     # only cell kinds measured at this band size
         grid["pick"] = None
-        if best is not None and best["ev"] >= EV_MIN and best["odds_src"] == "bc":   # only at bc.game's real price
+        if best is not None and best["ev_emp"] >= EV_MIN and best["odds_src"] == "bc":   # only at bc.game's label
             grid["pick"] = (best["k"], best["r"])
             self.paper_pending.append(dict(best, created=now, price=price))
         self.grid = grid
 
     @staticmethod
-    def _grid(now, price, gap, step, vol_cfg, vol_real, max_odds, bc_odds=None, calib=None) -> dict:
-        bc_odds, calib = bc_odds or {}, calib or {}
+    def _grid(now, price, gap, step, vol_cfg, vol_real, max_odds, bc_odds=None, calib=None, hits=None) -> dict:
+        bc_odds, calib, hits = bc_odds or {}, calib or {}, hits or {}
         first = (now - now % gap) + gap                       # the next column's start (server ms)
         base = math.floor(price / step) * step                # the band the price is in
         cols = [first + k * gap for k in range(COLS)]
@@ -585,7 +596,9 @@ class TapAnalyzer:
                 cells.append({"k": k, "r": r, "t0": t0, "t1": t0 + gap, "lo": lo, "hi": lo + step, "step": step,
                               "odds": round(o, 3), "odds_port": round(o_port, 3), "odds_src": "bc" if o_bc else "port",
                               "pm": round(pm, 5), "po": round(po, 5), "po_cal": round(po_cal, 5),
-                              "ev": round(po_cal * o, 4), "cal": (k, r) in calib})
+                              "ev": round(po_cal * o, 4), "cal": (k, r) in calib,
+                              "p_emp": round(hits[(k, r)], 4) if (k, r) in hits else None,      # measured hit rate
+                              "ev_emp": round(hits[(k, r)] * o, 4) if (k, r) in hits else None})  # x the label
         return {"now": now, "price": price, "cols": cols, "rows": rows, "cells": cells, "step": step,
                 "bc_cells": sum(1 for c in cells if c["odds_src"] == "bc")}
 
