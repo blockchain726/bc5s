@@ -273,3 +273,21 @@ def test_run_reset_is_typed_logged_and_kept_across_restarts(tmp_path):
     a2.pending_real[3000] = 1.0
     a2._real_settled(rec, "LOSS")
     assert a2.real_run == 1 and a2.state == "ARMED"
+
+
+def test_arming_goes_on_after_a_restart_until_it_expires(tmp_path):
+    t0 = time.time() - 3600
+    write_rounds(tmp_path / "auto_rounds.jsonl", list("WL"), t0)
+    a = trader_for(tmp_path, auto_resume_arm=True)
+    a.on = True
+    a.arm(1, time.strftime("%Y-%m-%d"), force=True, ladder=True)
+    assert a.state == "ARMED" and a.ladder_forced
+    a2 = trader_for(tmp_path, auto_resume_arm=True)        # a restart: the arming goes on, ladder included
+    assert a2.state == "ARMED" and a2.ladder_forced and a2.armed_at == a.armed_at
+    a2.armed_at -= 5 * 3600                                 # make it look 5 h old and save
+    a2._save_state()
+    a3 = trader_for(tmp_path, auto_resume_arm=True)        # expired: not resumed
+    assert a3.state == "DISARMED"
+    a.arm(1, time.strftime("%Y-%m-%d"), force=True)
+    a4 = trader_for(tmp_path, auto_resume_arm=False)       # the switch off: every start is disarmed, as before
+    assert a4.state == "DISARMED"

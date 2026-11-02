@@ -551,6 +551,8 @@ class AutoTrader:
         """The real-loss counter and the campaign, kept across restarts (the log is the source; this is a check)."""
         data = {"real_run": self.real_run, "updated": time.time(), "campaign_since": self.campaign_since,
                 "campaign_pnl": round(self.campaign_pnl, 4), "state": self.state, "stop_reason": self.stop_reason,
+                "armed_at": self.armed_at, "ladder_forced": self.ladder_forced, "arm_live_pnl": round(self.arm_live_pnl, 4),
+                "arm_orders": self.arm_orders, "rearm_grant": self.rearm_grant,
                 "tech_stop": self.tech_stop, "stopped_at": self.stopped_at, "rearms": self.rearms,
                 "run_reset_at": self.run_reset_at,
                 "unknown": self.unknown, "cleared": self.cleared, "day": self.day, "attempts_today": self.attempts_today}
@@ -602,6 +604,20 @@ class AutoTrader:
             self.stop_reason = self.stop_reason or f"{self.real_run} real losses in a row"
         else:
             self.state, self.stop_reason = "DISARMED", None
+            saved = getattr(self, "_saved_state", {}) or {}
+            armed_at = float(saved.get("armed_at") or saved.get("updated") or 0)
+            if (saved.get("state") == "ARMED" and self.cfg.auto_resume_arm
+                    and time.time() - armed_at < self.cfg.auto_arm_ttl_h * 3600):
+                self.state, self.armed_at = "ARMED", armed_at          # the arming goes on across the restart
+                self.ladder_forced = bool(saved.get("ladder_forced"))
+                self.rearm_grant = bool(saved.get("rearm_grant"))
+                self.arm_live_pnl = float(saved.get("arm_live_pnl") or 0.0)
+                self.arm_orders = int(saved.get("arm_orders") or 0)
+                if not self.campaign_since:
+                    self.campaign_since = armed_at
+                self._event("arm", who="restart", resumed=True, ladder=self.ladder_on())
+                log.warning("Real orders ARMED again after the restart (AUTO_RESUME_ARM=1; armed at %s, ladder %s)",
+                            time.strftime("%H:%M", time.localtime(armed_at)), "on" if self.ladder_on() else "off")
         self._save_state()
         self._event("start", rebuilt_run=self.real_run)
         log.info("Real orders: %s%s | %d real losses in a row (only a real WIN resets it) | %d attempts today, "
