@@ -357,6 +357,10 @@ class TapAnalyzer:
         self.regime = {"name": "unknown", "factor": 1.0, "trailing": None, "range_bands": None}
         self.paper_path = log_dir / "tap_paper.jsonl"
         self.models_path = log_dir / "tap_models.jsonl"   # settled picks of the candidate pickers (not the paper book)
+        self.rec_path = log_dir / "tap_rec.jsonl"          # research record: once a second, the price, bc.game's labels
+        self.ticks_path = log_dir / "tap_ticks.jsonl"      # for the next 6 columns x 7 bands, the context; and every tick
+        self._rec_last = 0.0
+        self._rec_tick_t = 0.0
         self.model_hour: dict = {}                         # model -> deque of (settled at, pnl) for the last hour
         self.public_path = log_dir / "tap_public.jsonl"
         self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
@@ -696,6 +700,34 @@ class TapAnalyzer:
         grid["ev_bar"] = self.ev_bar()
         self._pick_models(grid, now, price)
         self.grid = grid
+        self._record(now, price, step, grid)
+
+    def _record(self, now: float, price: float, step: float, grid: dict) -> None:
+        """Once a second: the price, bc.game's labels for the next columns and the bands around the price, and the
+        context a picker could use (band size, real vs configured volatility, regime, measured hit rates); plus every
+        tick since the last record.  For backtesting candidate pickers offline on real labels and real ticks."""
+        if now - self._rec_last < 1000:
+            return
+        self._rec_last = now
+        try:
+            new = [(t, p) for t, p in self.ticks if t > self._rec_tick_t]
+            if new:
+                self._rec_tick_t = new[-1][0]
+                with open(self.ticks_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ticks": [[int(t), round(p, 2)] for t, p in new]}) + "\n")
+            lab = {f'{c["k"]},{c["r"]}': c["odds"] for c in grid.get("cells", [])
+                   if abs(c["r"]) <= 3 and c.get("odds_src") == "bc"}
+            hits = {f'{c["k"]},{c["r"]}': c["p_emp"] for c in grid.get("cells", [])
+                    if abs(c["r"]) <= 3 and c.get("p_emp") is not None}
+            cols = {str(c["k"]): int(c["t0"]) for c in grid.get("cells", []) if c["r"] == 0}
+            tappable = sorted({c["k"] for c in grid.get("cells", []) if c.get("tappable")})
+            rec = {"t": int(now), "p": round(price, 2), "step": step, "cols": cols, "tappable": tappable, "lab": lab,
+                   "hits": hits, "vol_real": self.vol_real, "vol_cfg": self.cfg.get("volatility"),
+                   "regime": self.regime, "bar": grid.get("ev_bar"), "picks": grid.get("picks")}
+            with open(self.rec_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec) + "\n")
+        except (OSError, TypeError, ValueError) as e:
+            log.debug("Tap record: %r", e)
 
     def _pick_models(self, grid: dict, now: float, price: float) -> None:
         """Every candidate picker (MODELS) places at most one paper tap per column: its best cell by its own score
