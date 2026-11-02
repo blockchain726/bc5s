@@ -303,6 +303,8 @@ class TapAnalyzer:
         self._saved = 0.0
         self.vol_real = None
         self.bc_odds: dict = {}                         # bc.game's multipliers read off its grid: (t0, lo) -> odds
+        self.label_hist: dict = {}                      # the same, kept 10 min: (t0, lo) -> (odds, read at ms); a
+                                                        # player's tap on a labelled cell measures the server's payout
         self.bc_read: dict = {"n": 0, "err": "not read yet", "at": 0.0}
         self.step_inferred = None                       # the band size on screen (bc.game changes it)
         self._step_candidate, self._step_since = None, 0.0
@@ -588,6 +590,12 @@ class TapAnalyzer:
                             "items": [{k: (round(v, 1) if isinstance(v, float) else v) for k, v in it.items()}
                                       for it in bc["items"][:120]]}
         self.bc_odds = bc_odds
+        for key, o in bc_odds.items():                   # the first label seen for a cell is the one a player
+            self.label_hist.setdefault(key, (o, now))    # tapping early would have seen; later ones update
+            if self.label_hist[key][0] != o:
+                self.label_hist[key] = (o, now)
+        if len(self.label_hist) > 3000:
+            self.label_hist = {k: v for k, v in self.label_hist.items() if k[0] >= now - 600000}
         self.calib = self._calibration(step)
         self.regime = self._regime(step)
         self.hits = {kr: self._shrunk(p, step) for kr, p in self._hit_rates(step).items()}
@@ -825,8 +833,8 @@ class TapAnalyzer:
         rec = {"id": oid, "odds": o, "lo": lo, "hi": hi, "t0": t0, "t1": t1, "start_price": sp, "start_time": st,
                "won": won, "amount": r.get("amount"), "profit": r.get("profit"), "currency": r.get("currency"),
                "end_price": r.get("endPrice"), "end_time": r.get("endTime"), "status": r.get("status"),
-               "bc_odds_read": self.bc_odds.get((math.floor(t0 / (self.cfg["timeIncrement"] * 1000))
-                                                 * self.cfg["timeIncrement"] * 1000, round(lo, 2)))}
+               "bc_odds_read": (self.label_hist.get((math.floor(t0 / (self.cfg["timeIncrement"] * 1000))
+                                                    * self.cfg["timeIncrement"] * 1000, round(lo, 2))) or (None,))[0]}
         ticks = list(self.ticks)
         if ticks and ticks[0][0] <= t0 and ticks[-1][0] >= min(t1, float(r.get("endTime") or t1)):
             hit, hit_x = touched(ticks, lo, hi, t0, t1)              # our hit rule vs their real result
