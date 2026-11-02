@@ -805,7 +805,7 @@ class TapAnalyzer:
         return (
             f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; TAP {SYMBOL}</span>'
             f'<span class="mode paper">PAPER</span></div>'
-            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at the server's real payout</span></div>{nxt}</div>'
+            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at the real payout</span></div>{nxt}</div>'
             f'<div class="c"><div class="ct"><span>PAPER P&amp;L</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
             f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr}</div>{open_row}'
