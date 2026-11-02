@@ -426,7 +426,7 @@ class TapLive:
         b["pnl"] = round(b["pnl"] + profit, 4)
         b["run"] = 0 if won else b["run"] + 1
         b["longest"] = max(b["longest"], b["run"])
-        if b["run"] >= self.loss_run_pause:
+        if self.loss_run_pause > 0 and b["run"] >= self.loss_run_pause:    # 0 = never pause (the user's choice)
             self.paused_until = time.time() + self.pause_min * 60
             self._event("pause", run=b["run"], minutes=self.pause_min)
         self.recent.append({k: o.get(k) for k in ("id", "k", "r", "label", "odds", "result", "profit", "mode")})
