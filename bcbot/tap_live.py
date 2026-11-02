@@ -100,6 +100,7 @@ class TapLive:
         self.min_gap_s = float(_flag("TAP_MIN_GAP_S", "6"))
         self.ratio_min_n = int(_flag("TAP_RATIO_MIN_N", "5"))
         self.ratio_boot = float(_flag("TAP_RATIO_BOOT", "0.85"))   # assumed server/label ratio before it is measured
+        self.use_ratio = _flag("TAP_USE_RATIO", "1") != "0"        # 0: ignore the measured payout, price at the label
         self.loss_run_pause = int(_flag("TAP_LOSS_RUN_PAUSE", "10"))
         self.pause_min = float(_flag("TAP_PAUSE_MIN", "10"))
         self.state_path = log_dir / "tap_live_state.json"
@@ -171,6 +172,8 @@ class TapLive:
 
     def ratio(self) -> float | None:
         """Median server multiplier / page label over our last 20 orders, None before TAP_RATIO_MIN_N."""
+        if not self.use_ratio:
+            return None
         r = [x for x in self.st["ratios"][-20:] if x and x > 0]
         return statistics.median(r) if len(r) >= self.ratio_min_n else None
 
