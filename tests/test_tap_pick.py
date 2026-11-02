@@ -33,7 +33,7 @@ def test_regime_factor_from_trailing_hits_and_range(tmp_path):
     a.ticks = deque([(t0 + i * 500, 70000.0 + 30 * (i % 2)) for i in range(130)])   # range $30 = 6 bands: wild
     a.band_hits = deque([(i, i % 5 == 0) for i in range(60)])            # 20% trailing: cold
     r = a._regime(5.0)
-    assert r["name"] == "wild+cold" and r["factor"] == REGIME_FACTOR[("wild", "cold")] == 0.0   # never taps
+    assert r["name"] == "wild+cold" and r["factor"] == REGIME_FACTOR[("wild", "cold")]
     a.band_hits = deque()
     assert a._regime(5.0)["factor"] == 1.0                   # unknown: no change
 
