@@ -134,6 +134,10 @@ class TapLive:
                     self.st[k] = saved[k]
         except (OSError, ValueError):
             pass
+        st = self.st.get("stopped")
+        if st and "2024" in str(st.get("why", "")):           # a stop for "tap config error" (the band size changed
+            log.warning("Tap live: dropping the old stop %r (no longer a stop condition)", st.get("why"))
+            self.st["stopped"] = None                          # under an order) is not a stop any more
 
     def _save(self) -> None:
         err = None
