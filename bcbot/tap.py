@@ -71,6 +71,13 @@ def _calm(ctx) -> bool:
     return _range_under(ctx, REGIME_RANGE_BANDS)
 
 
+def _mid(ctx) -> bool:
+    """The price sits in the middle of its band (0.2-0.8), moved under a quarter band in the last 2 s, calm market.
+    Backtest 2026-11-02 (40 min, $10 bands): the current band hit 54% mid-band vs 41% at an edge at the same label."""
+    return (ctx.get("pos") is not None and 0.2 <= ctx["pos"] <= 0.8 and ctx.get("mv2") is not None
+            and abs(ctx["mv2"]) < 0.25 and _range_under(ctx, 4.0))
+
+
 def _score_label(c, ctx):
     return c["ev_emp"]                                    # measured hit rate x the grid label (regime factor in)
 
@@ -118,6 +125,12 @@ MODELS = (
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and c["k"] >= 3 and _range_under(x, 6.0)
      and c["hi"] - c["lo"] >= 5 else None,
      "desc": "the same gates as best, at the live bar (label)"},
+    {"name": "mid", "color": "#fb7185", "bar": 1.0,
+     "score": lambda c, x: _score_paid(c, x) if c["r"] == 0 and _mid(x) else None,
+     "desc": "current band while the price is mid-band (0.2-0.8), moved < 0.25 band in 2 s, range < 4: paid EV >= 1"},
+    {"name": "mid-lo", "color": "#94a3b8", "bar": None,
+     "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and _mid(x) else None,
+     "desc": "the live picker with the same mid-band gate"},
 )
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
@@ -737,7 +750,15 @@ class TapAnalyzer:
         lv = getattr(self, "live", None)
         if lv is not None and lv.mode != "off" and lv._why_not(now) is not None:
             return
-        ctx = {"regime": self.regime, "pay": lv.payout if lv is not None else (lambda k: PAYOUT_FALLBACK)}
+        cells = grid.get("cells") or []
+        step = (cells[0]["hi"] - cells[0]["lo"]) if cells else None
+        pos = mv2 = None
+        if step:
+            pos = (price - math.floor(price / step) * step) / step        # where the price sits in its band
+            p2 = next((p for t, p in reversed(getattr(self, "ticks", None) or ()) if t <= now - 2000), None)
+            mv2 = (price - p2) / step if p2 is not None else None          # the last 2 s move, in bands
+        ctx = {"regime": self.regime, "pay": lv.payout if lv is not None else (lambda k: PAYOUT_FALLBACK),
+               "pos": pos, "mv2": mv2}
         taken: dict = {}
         for c in self.paper_pending:
             taken.setdefault(c.get("model", "label"), set()).add(c["t0"])

@@ -53,7 +53,25 @@ def test_each_picker_places_its_own_tap(tmp_path):
                              "best-lo": (4, 0)}
     assert sorted(c["model"] for c in a.paper_pending) == sorted(grid["picks"])
     a._pick_models(grid, 600.0, 102.0)                                   # the same columns again: nothing new
-    assert len(a.paper_pending) == len(MODELS)
+    assert len(a.paper_pending) == len(MODELS) - 2                       # the mid-band pickers have no ticks here
+
+
+def test_mid_band_pickers_need_a_quiet_mid_band_price(tmp_path):
+    a = _analyzer(tmp_path)
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a.ticks = deque([(0.0, 102.0), (400.0, 102.0)])                      # price 102 in [100, 105): pos 0.4, no move
+    a._pick_models(grid, 2500.0, 102.0)
+    assert grid["picks"]["mid"] == (4, 0) and grid["picks"]["mid-lo"] == (2, 0)   # paid: 1.425 >= 1; label: A
+    a = _analyzer(tmp_path)
+    a.ticks = deque([(0.0, 100.3), (400.0, 100.3)])                      # moved 0.34 band in 2 s: no
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, 2500.0, 102.0)
+    assert "mid" not in grid["picks"] and "mid-lo" not in grid["picks"]
+    a = _analyzer(tmp_path)
+    a.ticks = deque([(0.0, 104.6), (400.0, 104.6)])                      # at the top edge (pos 0.92): no
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, 2500.0, 104.6)
+    assert "mid" not in grid["picks"]
 
 
 def test_calm_only_pickers_sit_out_a_wild_market(tmp_path):
