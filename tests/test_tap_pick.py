@@ -36,3 +36,17 @@ def test_regime_factor_from_trailing_hits_and_range(tmp_path):
     assert r["name"] == "wild+cold" and r["factor"] == REGIME_FACTOR[("wild", "cold")]
     a.band_hits = deque()
     assert a._regime(5.0)["factor"] == 1.0                   # unknown: no change
+
+
+def test_trailing_rate_caps_the_estimate():
+    from collections import deque
+    a = TapAnalyzer.__new__(TapAnalyzer)
+    a.band_hits = deque([(i, i % 4 == 0) for i in range(60)])          # 25% trailing (a wild night)
+    a.regime = {"factor": 0.76, "trailing": 0.25}
+    est = a._shrunk(0.55, 5.0)                                          # history 55%: (30*0.55 + 60*0.25)/90 = 0.35
+    assert abs(est - 0.35) < 1e-9 and est < 0.55 * 0.76
+    a.band_hits = deque([(i, i % 5 != 0) for i in range(60)])          # 80% trailing (calm): the factor rules
+    a.regime = {"factor": 1.20, "trailing": 0.8}
+    assert abs(a._shrunk(0.55, 5.0) - 0.66) < 1e-9
+    a.regime = {"factor": 1.0, "trailing": None}                        # unknown trailing: the long-run rate
+    assert a._shrunk(0.55, 5.0) == 0.55

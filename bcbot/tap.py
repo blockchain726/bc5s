@@ -53,7 +53,8 @@ ODDS_READ_MS = 1000           # bc.game's multiplier labels drawn within this ma
 CALIB_MIN_N = 1000
 REGIME_FACTOR = {("calm", "hot"): 1.20, ("calm", "cold"): 1.04, ("wild", "hot"): 0.94, ("wild", "cold"): 0.76}
 REGIME_RANGE_BANDS = 4.0      # 60 s price range in band units: below = calm
-REGIME_HOT = 0.45             # trailing hit rate of the last 60 settled current-band taps: at least = hot            # virtual taps of a cell kind before its realized hit rate calibrates the model
+REGIME_HOT = 0.45             # trailing hit rate of the last 60 settled current-band taps: at least = hot
+TRAILING_PRIOR_N = 30         # the long-run rate counts as this many taps against the trailing 60 (shrinkage)            # virtual taps of a cell kind before its realized hit rate calibrates the model
 STEP_CONFIRM_S = 10          # a band size read off the labels that differs from the settings must hold this long
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
@@ -518,6 +519,17 @@ class TapAnalyzer:
         return {"trailing": round(trailing, 3), "range_bands": round(rng, 2), "name": "+".join(name),
                 "factor": REGIME_FACTOR[name]}
 
+    def _shrunk(self, p_long: float, step: float) -> float:
+        """The hit rate to trust now: the long-run measured rate times the regime factor, but never above the blend
+        of that rate (weight TRAILING_PRIOR_N) with the trailing rate of the last 60 settled current-band taps.  A
+        night like the reopen (trailing 23% against a 55% history) is then priced from what is happening."""
+        est = p_long * self.regime["factor"]
+        tr = self.regime.get("trailing")
+        if tr is not None:
+            n = min(60, len(self.band_hits))
+            est = min(est, (TRAILING_PRIOR_N * p_long + n * tr) / (TRAILING_PRIOR_N + n))
+        return est
+
     def _hit_rates(self, step: float) -> dict:
         """(k, r) -> the realized hit rate of that cell kind at THIS band size, from the virtual taps settled on the
         real price (n >= CALIB_MIN_N).  This is what the picker trusts: not the model, not a corrected model."""
@@ -574,7 +586,7 @@ class TapAnalyzer:
         self.bc_odds = bc_odds
         self.calib = self._calibration(step)
         self.regime = self._regime(step)
-        self.hits = {kr: p * self.regime["factor"] for kr, p in self._hit_rates(step).items()}
+        self.hits = {kr: self._shrunk(p, step) for kr, p in self._hit_rates(step).items()}
         grid = await asyncio.to_thread(self._grid, now, price, gap, step, self.cfg["volatility"],
                                        self.vol_real or self.cfg["volatility"], self.cfg["maxOdds"], bc_odds,
                                        self.calib, self.hits)
