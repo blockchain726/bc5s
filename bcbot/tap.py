@@ -538,6 +538,10 @@ class TapAnalyzer:
             st, k, r = key.split(",")
             if float(st) == step and s["n"] >= CALIB_MIN_N:
                 out[(int(k), int(r))] = s["hit"] / s["n"]
+        for key, s in self.stats.get("cells", {}).items():      # the current band only: its rate is alike at
+            k, r = map(int, key.split(","))                   # every band size (47-60%), so a band size not yet
+            if r == 0 and (k, 0) not in out and s["n"] >= CALIB_MIN_N:   # measured borrows the all-band rate;
+                out[(k, 0)] = s["hit"] / s["n"]               # far cells never do (their rates differ by band)
         return out
 
     def _calibration(self, step: float) -> dict:
