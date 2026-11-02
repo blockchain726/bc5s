@@ -220,6 +220,8 @@ async function tick() {
     (ratio ? ` = <b class="${ratio < 1 ? 'up' : 'down'}">${(100 * ratio).toFixed(0)}%</b> of bc.game's` : '') +
     `<div class="note">Below 100%: the price moves less than bc.game's model assumes, so cells near the price get hit more often ` +
     `than their multiplier prices in, far cells less often. Statistics since ${new Date(d.since * 1000).toLocaleString()}.</div>`;
+  const rg = d.regime || {};
+  document.getElementById('info').innerHTML += `<div style="margin-top:4px">regime now: <b>${rg.name || '?'}</b> &middot; last 60 current-band taps hit ${rg.trailing != null ? Math.round(100 * rg.trailing) + '%' : '–'} &middot; 60 s price range ${rg.range_bands != null ? rg.range_bands + ' bands' : '–'} &middot; hit-rate factor <b>${rg.factor}</b> <span class="mute">(calm+hot 1.20 &middot; calm+cold 1.04 &middot; wild+hot 0.94 &middot; wild+cold 0.76, from 70k measured taps)</span></div>`;
   grid(d.grid); cells(d.cells || []); ev(d.ev || []); paper(d.paper || {}); pub(d.public || {});
 }
 tick(); setInterval(tick, 1000);

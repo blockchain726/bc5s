@@ -49,7 +49,10 @@ EV_BUCKETS = (0.0, 0.8, 0.9, 1.0, 1.05, 1.1, 1.2, 1.5, float("inf"))
 ODDS_BUCKETS = (1.0, 1.5, 2.0, 3.0, 5.0, 7.99, float("inf"))
 STEPS_USD = (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0)   # band sizes bc.game uses; the one on screen is inferred
 ODDS_READ_MS = 1000           # bc.game's multiplier labels drawn within this many ms are the grid on screen now
-CALIB_MIN_N = 1000            # virtual taps of a cell kind before its realized hit rate calibrates the model
+CALIB_MIN_N = 1000
+REGIME_FACTOR = {("calm", "hot"): 1.20, ("calm", "cold"): 1.04, ("wild", "hot"): 0.94, ("wild", "cold"): 0.76}
+REGIME_RANGE_BANDS = 4.0      # 60 s price range in band units: below = calm
+REGIME_HOT = 0.45             # trailing hit rate of the last 60 settled current-band taps: at least = hot            # virtual taps of a cell kind before its realized hit rate calibrates the model
 STEP_CONFIRM_S = 10          # a band size read off the labels that differs from the settings must hold this long
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
@@ -282,6 +285,8 @@ class TapAnalyzer:
         self.pending: list = []                         # virtual taps waiting for their window to end
         self.paper_pending: list = []
         self.stats_path = log_dir / "tap_stats.json"
+        self.band_hits: deque = deque(maxlen=200)         # (t1, hit) of settled current-band virtual taps
+        self.regime = {"name": "unknown", "factor": 1.0, "trailing": None, "range_bands": None}
         self.paper_path = log_dir / "tap_paper.jsonl"
         self.public_path = log_dir / "tap_public.jsonl"
         self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0},
@@ -499,6 +504,19 @@ class TapAnalyzer:
             self.debug_texts = d["texts"]
         return d
 
+    def _regime(self, step: float) -> dict:
+        """The regime now: the trailing hit rate of the last 60 settled current-band virtual taps and the 60 s price
+        range in band units -> a factor on the measured hit rates (REGIME_FACTOR).  1.0 while unknown."""
+        last = list(self.band_hits)[-60:]
+        trailing = sum(h for _, h in last) / len(last) if len(last) >= 30 else None
+        ticks = [p for t, p in self.ticks if t >= self.ticks[-1][0] - 60000] if self.ticks else []
+        rng = (max(ticks) - min(ticks)) / step if len(ticks) >= 20 and step else None
+        if trailing is None or rng is None:
+            return {"trailing": trailing, "range_bands": rng, "name": "unknown", "factor": 1.0}
+        name = ("calm" if rng < REGIME_RANGE_BANDS else "wild", "hot" if trailing >= REGIME_HOT else "cold")
+        return {"trailing": round(trailing, 3), "range_bands": round(rng, 2), "name": "+".join(name),
+                "factor": REGIME_FACTOR[name]}
+
     def _hit_rates(self, step: float) -> dict:
         """(k, r) -> the realized hit rate of that cell kind at THIS band size, from the virtual taps settled on the
         real price (n >= CALIB_MIN_N).  This is what the picker trusts: not the model, not a corrected model."""
@@ -554,7 +572,8 @@ class TapAnalyzer:
                                       for it in bc["items"][:120]]}
         self.bc_odds = bc_odds
         self.calib = self._calibration(step)
-        self.hits = self._hit_rates(step)
+        self.regime = self._regime(step)
+        self.hits = {kr: p * self.regime["factor"] for kr, p in self._hit_rates(step).items()}
         grid = await asyncio.to_thread(self._grid, now, price, gap, step, self.cfg["volatility"],
                                        self.vol_real or self.cfg["volatility"], self.cfg["maxOdds"], bc_odds,
                                        self.calib, self.hits)
@@ -615,6 +634,8 @@ class TapAnalyzer:
         ticks = list(self.ticks)
         for c in due:
             hit, hit_x = touched(ticks, c["lo"], c["hi"], c["t0"], c["t1"])
+            if c["r"] == 0 and c.get("odds_src") == "bc":
+                self.band_hits.append((c["t1"], hit))
             for key, table in ((f'{c["k"]},{c["r"]}', "cells"), (_bucket(c["ev"], EV_BUCKETS), "ev"),
                                (f'{c.get("step", c["hi"] - c["lo"]):g},{c["k"]},{c["r"]}', "cells_step")):
                 s = self.stats.setdefault(table, {}).setdefault(key, {"n": 0, "hit": 0, "hit_x": 0, "odds": 0.0,
@@ -878,6 +899,7 @@ class TapAnalyzer:
             "bc_odds": {f"{int(t0)},{lo:g}": o for (t0, lo), o in self.bc_odds.items()},
             "debug_texts": self.debug_texts,
             "sym_cfg": self.sym_cfg, "market_open": self.market_open(), "live": self.live.summary(),
+            "regime": self.regime,
             "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": EV_MIN,
                       "open": len(self.paper_pending)},
             "public": {**pub, "recent": list(self.public_recent)[::-1],
