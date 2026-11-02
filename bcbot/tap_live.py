@@ -138,7 +138,7 @@ class TapLive:
             pass
         st = self.st.get("stopped")
         why = str((st or {}).get("why", ""))
-        if st and ("2024" in why or "not settled 60 s" in why or "no answer in 5 s" in why):   # no longer stop conditions
+        if st and ("2024" in why or "not settled 60 s" in why or "no answer in 5 s" in why or "was booked at" in why):
             log.warning("Tap live: dropping the old stop %r (no longer a stop condition)", why)   # an order; a
             self.st["stopped"] = None                              # result missed across a restart)
             for o in self.st["orders"].values():
@@ -392,7 +392,13 @@ class TapLive:
                  self.mode.upper(), order["id"], self.stake, cell["lo"], cell["hi"],
                  time.strftime("%H:%M:%S", time.gmtime(cell["t0"] / 1000)), cell["k"], cell["r"], odds, cell["odds"])
         if booked_t0 is not None and (abs(float(booked_t0) - cell["t0"]) > 1 or abs(float(booked_lo) - cell["lo"]) > 0.01):
-            self._stop(f"order {order['id']} was booked at {booked_t0}/{booked_lo}, not {cell['t0']}/{cell['lo']}")
+            step = cell["hi"] - cell["lo"]                      # the click landed at the edge of the lead time and the
+            order["t0"], order["lo"] = float(booked_t0), float(booked_lo)   # server booked the next column: keep the
+            order["t1"], order["hi"] = float(booked_t0) + (cell["t1"] - cell["t0"]), float(booked_lo) + step   # booked cell
+            self._save()
+            self._event("rebooked", id=order["id"], t0=order["t0"], lo=order["lo"], wanted_t0=cell["t0"], wanted_lo=cell["lo"])
+            log.warning("Tap live: order %s was booked at %s/%s, not %s/%s: kept as booked", order["id"], booked_t0,
+                        booked_lo, cell["t0"], cell["lo"])
 
     # ---------- results ----------
 
