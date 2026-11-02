@@ -727,9 +727,11 @@ class TapAnalyzer:
         for c in (g or {}).get("cells", []):
             if pick == (c["k"], c["r"]):
                 continue
-            cls = ("good" if c["ev"] >= 1 else "") + ("" if c.get("tappable") else " off")
+            ev = c.get("ev_emp")                                 # the measured EV the picker uses (None: unmeasured)
+            bar = g.get("ev_bar") or EV_MIN
+            cls = ("good" if ev is not None and ev >= bar else "") + ("" if c.get("tappable") else " off")
             cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": cls,
-                          "label": f"{c['ev']:.2f}"})
+                          "label": f"{ev:.2f}" if ev is not None else "·"})
         for c in self.paper_pending:                          # paper taps still waiting for their window
             cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "pick",
                           "label": f"PAPER $1 x{c['odds']:.2f} ({c.get('odds_src', 'port')})"})
