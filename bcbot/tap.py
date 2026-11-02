@@ -62,9 +62,13 @@ STEP_CONFIRM_S = 10          # a band size read off the labels that differs from
 
 
 # ---------- candidate pickers, tested side by side on paper: each its own book and its own colour on the page ----
-def _calm(ctx) -> bool:
+def _range_under(ctx, bands: float) -> bool:
     rb = ctx["regime"].get("range_bands")
-    return rb is not None and rb < REGIME_RANGE_BANDS
+    return rb is not None and rb < bands
+
+
+def _calm(ctx) -> bool:
+    return _range_under(ctx, REGIME_RANGE_BANDS)
 
 
 def _score_label(c, ctx):
@@ -94,6 +98,14 @@ MODELS = (
     {"name": "big-label", "color": "#60a5fa", "bar": 1.35,
      "score": lambda c, x: _score_paid(c, x) if c["odds"] >= 3.5 else None,
      "desc": "paid >= 1.35, only cells whose label is 3.5 or more"},
+    # measured 2026-11-02 on 3,500 label picks: at $5 bands the picks lose 2-6% per $ while the 60 s range is under
+    # 6 bands and 21-52% above it; at $2 bands they lose at every range
+    {"name": "paid-r6", "color": "#2dd4bf", "bar": 1.35,
+     "score": lambda c, x: _score_paid(c, x) if _range_under(x, 6.0) else None,
+     "desc": "paid >= 1.35, only while the 60 s range is under 6 bands"},
+    {"name": "label-r6", "color": "#c084fc", "bar": None,
+     "score": lambda c, x: _score_label(c, x) if _range_under(x, 6.0) else None,
+     "desc": "the live picker, only while the 60 s range is under 6 bands"},
 )
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
