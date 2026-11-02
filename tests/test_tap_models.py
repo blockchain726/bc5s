@@ -49,7 +49,8 @@ def test_each_picker_places_its_own_tap(tmp_path):
     assert grid["pick"] == (2, 0)                                        # the live picker: by the label EV
     assert grid["picks"] == {"label": (2, 0), "paid": (4, 0), "paid-lo": (4, 0), "paid-calm": (4, 0),
                              "paid-far": (4, 0), "calm-label": (2, 0), "big-label": (4, 0),
-                             "paid-r6": (4, 0), "label-r6": (2, 0)}
+                             "paid-r6": (4, 0), "label-r6": (2, 0), "label-r0": (2, 0), "best": (4, 0),
+                             "best-lo": (4, 0)}
     assert sorted(c["model"] for c in a.paper_pending) == sorted(grid["picks"])
     a._pick_models(grid, 600.0, 102.0)                                   # the same columns again: nothing new
     assert len(a.paper_pending) == len(MODELS)
@@ -61,6 +62,7 @@ def test_calm_only_pickers_sit_out_a_wild_market(tmp_path):
     a._pick_models(grid, 500.0, 102.0)
     assert "paid-calm" not in grid["picks"] and "calm-label" not in grid["picks"] and "paid" in grid["picks"]
     assert "paid-r6" not in grid["picks"] and "label-r6" not in grid["picks"]       # 6 bands is not under 6
+    assert "best" not in grid["picks"] and "best-lo" not in grid["picks"] and grid["picks"]["label-r0"] == (2, 0)
 
 
 def test_candidates_book_in_their_own_books(tmp_path):

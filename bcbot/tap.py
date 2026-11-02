@@ -106,6 +106,18 @@ MODELS = (
     {"name": "label-r6", "color": "#c084fc", "bar": None,
      "score": lambda c, x: _score_label(c, x) if _range_under(x, 6.0) else None,
      "desc": "the live picker, only while the 60 s range is under 6 bands"},
+    # measured 2026-11-02 09:00-10:05 on $20 bands: adjacent-band picks hit 23% (-34% per $), current-band picks 55%
+    {"name": "label-r0", "color": "#ffffff", "bar": None,
+     "score": lambda c, x: _score_label(c, x) if c["r"] == 0 else None,
+     "desc": "the live picker, current band only"},
+    {"name": "best", "color": "#34d399", "bar": 1.35,
+     "score": lambda c, x: _score_paid(c, x) if c["r"] == 0 and c["k"] >= 3 and _range_under(x, 6.0)
+     and c["hi"] - c["lo"] >= 5 else None,
+     "desc": "composite: current band, 3+ columns ahead, range under 6 bands, $5+ bands, paid >= 1.35"},
+    {"name": "best-lo", "color": "#d6a05c", "bar": None,
+     "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and c["k"] >= 3 and _range_under(x, 6.0)
+     and c["hi"] - c["lo"] >= 5 else None,
+     "desc": "the same gates as best, at the live bar (label)"},
 )
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
@@ -901,7 +913,8 @@ class TapAnalyzer:
                               "label": f"PAPER $1 x{c['odds']:.2f} ({c.get('odds_src', 'port')})"})
             else:
                 cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "mpick",
-                              "color": colors.get(model, "#fff"), "inset": 3 * order.get(model, 1), "label": model})
+                              "color": colors.get(model, "#fff"), "inset": 3 * min(order.get(model, 1), 7),
+                              "label": model})
         for r in list(self.paper_recent)[-8:]:                # settled ones, while still on screen
             cells.append({"t0": r["t0"], "t1": r["t0"] + gap, "lo": r["lo"], "hi": r["hi"],
                           "cls": "hit" if r["hit"] else "miss",
