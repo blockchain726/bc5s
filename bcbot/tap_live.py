@@ -20,6 +20,7 @@ Rules, all checked right before each click:
   * logs/TAP_KILL: stop
 Every attempt, order and result goes to logs/tap_live.jsonl.
 """
+import asyncio
 import json
 import logging
 import os
@@ -324,8 +325,8 @@ class TapLive:
         self._event("intent", **intent)
         resp = None
         try:
-            async with page.expect_response(lambda r: ORDER_URL in r.url, timeout=5000) as info:
-                await page.mouse.click(pt["x"], pt["y"])
+            async with page.expect_response(lambda r: ORDER_URL in r.url, timeout=15000) as info:
+                await page.mouse.click(pt["x"], pt["y"])      # the server's answer takes 2-7 s (measured)
             resp = await info.value
         except Exception:
             resp = None
@@ -337,15 +338,24 @@ class TapLive:
                 self._event("no_request", **intent)
                 self.last_reason = "the click sent no order"
                 if self.no_request >= 3:
-                    self._stop("3 clicks in a row sent no order (the page's layout or rules changed?)")
+                    log.warning("Tap live: 3 clicks in a row sent no order (the page's layout or rules changed?); "
+                                "pausing 10 s")
+                    self.last_at = time.time() + 10
+                    self.no_request = 0
                 return
             oid = f"unknown-{int(time.time() * 1000)}"
             self.st["orders"][oid] = dict(intent, id=oid, unknown=True, sent=sent["req"], result=None, mode=self.mode)
             self._save()
             self._event("no_answer", id=oid, **intent)
-            log.warning("Tap live: an order was sent and got no answer in 5 s (held as unknown for 70 s; see the "
-                        "page's Positions)")
+            log.warning("Tap live: an order was sent and got no answer in 15 s (held as unknown; booked if the "
+                        "answer comes later, dropped after 70 s)")
             self.last_reason = "an order without an answer"
+
+            def late(r):                                   # the answer arriving after the wait: book the order
+                if ORDER_URL in r.url:
+                    page.remove_listener("response", late)
+                    asyncio.ensure_future(self._book_late(oid, intent, r))
+            page.on("response", late)
             return
         self.no_request = 0
         try:
@@ -417,6 +427,35 @@ class TapLive:
         log.info("Tap %s order %s: %s %+.2f (x%.2f) | %s P&L %+.2f, %d/%d won, losses in a row %d",
                  o.get("mode", "").upper(), oid, o["result"], profit, o.get("odds") or 0, o.get("mode"), b["pnl"],
                  b["wins"], b["bets"], b["run"])
+
+    async def _book_late(self, oid: str, intent: dict, resp) -> None:
+        """An order's answer that came after the 15 s wait: book it in place of the unknown order."""
+        try:
+            body = await resp.json()
+        except Exception:
+            return
+        data = body.get("data") if isinstance(body.get("data"), dict) else {}
+        if body.get("code") != 0 or not data.get("id"):
+            self.st["orders"].pop(oid, None)                       # rejected after all: nothing placed
+            self._event("rejected", code=body.get("code"), msg=body.get("msg"), late=True, **intent)
+            self._save()
+            return
+        odds = float(data.get("odds") or 0)
+        order = dict(intent, id=str(data["id"]), odds=odds,
+                     ratio=round(odds / intent["label"], 4) if odds and intent.get("label") else None,
+                     booked_t0=data.get("lowerTimeLimit"), booked_lo=data.get("lowerPriceLimit"), amount=data.get("amount"),
+                     currency=data.get("currency"), usd=self.stake, result=None, mode=self.mode, late=True)
+        self.st["orders"].pop(oid, None)
+        self.st["orders"][order["id"]] = order
+        if order["ratio"]:
+            self.st["ratios"].append(order["ratio"])
+            self.st["ratios"] = self.st["ratios"][-200:]
+        b = self.book()
+        b["bets"] += 1
+        b["staked"] = round(b["staked"] + self.stake, 4)
+        self._save()
+        self._event("order", **{k: v for k, v in order.items() if k != "sent"})
+        log.warning("Tap live: late answer booked: order %s x%.2f", order["id"], odds)
 
     def check_stale(self) -> None:
         """An order not settled 60 s after its window ended (its end message was missed, e.g. across a restart):
