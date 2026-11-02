@@ -97,6 +97,7 @@ class TapLive:
         self.max_open = int(_flag("TAP_MAX_OPEN", "2"))
         self.min_gap_s = float(_flag("TAP_MIN_GAP_S", "6"))
         self.ratio_min_n = int(_flag("TAP_RATIO_MIN_N", "5"))
+        self.ratio_boot = float(_flag("TAP_RATIO_BOOT", "0.85"))   # assumed server/label ratio before it is measured
         self.loss_run_pause = int(_flag("TAP_LOSS_RUN_PAUSE", "10"))
         self.pause_min = float(_flag("TAP_PAUSE_MIN", "10"))
         self.state_path = log_dir / "tap_live_state.json"
@@ -199,9 +200,7 @@ class TapLive:
             return f"{self.max_open} taps open"
         if any(o.get("unknown") for o in self.st["orders"].values()):
             return "an order without an answer"
-        if self.mode == "real":
-            if self.ratio() is None:
-                return f"server/label ratio unknown (< {self.ratio_min_n} orders)"
+        if self.mode == "real":                   # before TAP_RATIO_MIN_N orders the EV assumes TAP_RATIO_BOOT
             b = self.st["real"]
             at_risk = sum(o.get("usd", self.stake) for o in self.open_orders())
             if b["pnl"] - at_risk - self.stake < -self.budget:
@@ -211,7 +210,7 @@ class TapLive:
 
     def _choose(self, now_ms: float) -> dict | None:
         g = self.a.grid or {}
-        ratio = self.ratio() or 1.0
+        ratio = self.ratio() or self.ratio_boot
         taken = {(o["t0"], o["lo"]) for o in self.st["orders"].values()}
         best = None
         for c in g.get("cells", []):
@@ -399,6 +398,30 @@ class TapLive:
                 self._save()
                 self._stop(f"order {o['id']} not settled 60 s after its window")
 
+    def set_mode(self, mode: str, who: str = "operator") -> str:
+        """Switch live taps off / demo / real at runtime (the dashboard, with the token).  Logged.  A budget stop
+        stays; the page's account must match the mode (demo <-> the DEMO account) or no tap is placed."""
+        mode = (mode or "").strip().lower()
+        if mode not in ("off", "demo", "real"):
+            raise ValueError("Tap live mode must be off, demo or real")
+        was, self.mode = self.mode, mode
+        self._event("mode", was=was, who=who)
+        msg = (f"Tap live {mode.upper()}: ${self.stake:g} per tap, budget ${self.budget:g}, min EV {self.min_ev:.2f}"
+               + (f", server/label ratio {self.ratio():.2f}" if self.ratio() else
+                  f", ratio assumed {self.ratio_boot:.2f} until {self.ratio_min_n} orders"))
+        log.warning(msg)
+        return msg
+
+    def set_stake(self, usd: float, who: str = "operator") -> str:
+        """The stake per tap, $0.1 to $5, at runtime.  Logged."""
+        usd = float(usd)
+        if not 0.1 <= usd <= 5:
+            raise ValueError("the Tap stake must be between $0.1 and $5")
+        was, self.stake = self.stake, round(usd, 2)
+        self._event("stake", was=was, who=who)
+        log.warning("Tap live stake $%g per tap (was $%g)", self.stake, was)
+        return f"Tap stake ${self.stake:g} per tap"
+
     def clear(self) -> None:
         """Clear a technical stop (not a budget stop): unknown / stale orders are dropped from the open list."""
         for o in self.st["orders"].values():
@@ -411,6 +434,7 @@ class TapLive:
 
     def summary(self) -> dict:
         return {"mode": self.mode, "stake": self.stake, "budget": self.budget, "min_ev": self.min_ev,
+                "ratio_boot": self.ratio_boot, "ratio_min_n": self.ratio_min_n, "max_open": self.max_open,
                 "stopped": self.st["stopped"], "paused_s": max(0, round(self.paused_until - time.time())),
                 "ratio": self.ratio(), "ratios_n": len(self.st["ratios"]), "real": self.st["real"], "demo": self.st["demo"],
                 "open": len(self.open_orders()), "last_reason": self.last_reason, "panel": self.panel,

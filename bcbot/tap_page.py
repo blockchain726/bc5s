@@ -23,10 +23,26 @@ th{color:#8793a2;font-weight:normal}td.l,th.l{text-align:left}
 </style></head><body>
 <div class="top">
   <div><a href="/">&larr; Up/Down dashboard</a></div>
-  <div class="title">TAP ANALYZER &middot; <span id="sym">BTC/USD</span> <span class="tag">PAPER ONLY &middot; no orders</span></div>
+  <div class="title">TAP ANALYZER &middot; <span id="sym">BTC/USD</span> <span class="tag" id="modetag">PAPER</span></div>
   <div id="status" class="mute"></div>
 </div>
 <div id="info" class="c"></div>
+<div class="c" style="border-color:#b4232f">
+  <div class="ct"><span>LIVE TAPS</span><span class="mute">real taps on bc.game's Tap game; every click here needs the API token</span></div>
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0">
+    <span class="mute">mode</span>
+    <button data-tapmode="off">OFF</button><button data-tapmode="demo" title="the page's DEMO account: real server multipliers, no money">DEMO</button>
+    <button data-tapmode="real" class="liveb" title="account money">REAL</button>
+    <span class="mute" style="margin-left:10px">stake $</span><input id="tapstake" type="number" step="0.1" min="0.1" max="5" style="width:60px;font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:4px 6px">
+    <button id="setstake">set</button>
+    <input type="password" id="tok" placeholder="API token (from .env)" title="the API_TOKEN from .env; kept in this browser" style="margin-left:10px;font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:4px 8px;width:150px">
+    <span id="tokst"></span></div>
+  <div id="livest" class="mute"></div>
+  <div id="liveres" style="font-weight:bold;min-height:16px"></div>
+  <div id="livebook"></div>
+</div>
+<style>button{font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:4px 10px;cursor:pointer}
+button.on{background:#2f6fd6;border-color:#2f6fd6;color:#fff}button.liveb.on{background:#b4232f;border-color:#b4232f}</style>
 <div class="wrap">
   <div>
     <div class="c"><div class="ct"><span>THE GRID NOW</span><span class="mute">bc.game's multiplier &middot; our EV
@@ -131,9 +147,64 @@ function pub(p) {
     (by.length ? '<table style="margin-top:6px"><tr><th class="l">multiplier</th><th>taps</th><th>won</th><th>fair (0.97/×)</th></tr>' +
       by.map(([k, b]) => `<tr><td class="l">${k}</td><td>${b.n}</td><td>${pct(b.won / b.n)}</td><td>${pct(0.97 / (b.odds / b.n))}</td></tr>`).join('') + '</table>' : '');
 }
+// ---- live taps: the token (shared with the Up/Down dashboard), mode and stake ----
+const tokBox = document.getElementById('tok');
+const cleanTok = v => (v || '').trim().replace(/^API_TOKEN *= */i, '').replace(/^["']|["']$/g, '').trim();
+tokBox.value = localStorage.apiToken || '';
+function tokStatus(ok, text) { document.getElementById('tokst').innerHTML = ` <b class="${ok ? 'up' : 'down'}">${text}</b>`; }
+async function checkTok() {
+  const tok = cleanTok(tokBox.value);
+  if (!tok) { tokStatus(false, '<- paste the token'); return false; }
+  try {
+    const r = await fetch('/auto' + q, {method: 'POST', headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + tok}, body: '{}'});
+    if (r.ok) localStorage.apiToken = tok;
+    tokStatus(r.ok, r.ok ? 'token OK' : 'token WRONG'); return r.ok;
+  } catch (e) { tokStatus(false, 'bot not reachable'); return false; }
+}
+tokBox.addEventListener('change', checkTok); tokBox.addEventListener('paste', () => setTimeout(checkTok, 50));
+if (tokBox.value) checkTok(); else tokStatus(false, '<- paste the token');
+function result(ok, text) { const el = document.getElementById('liveres'); el.className = ok ? 'up' : 'down'; el.textContent = text; }
+async function post(body) {
+  const headers = {'Content-Type': 'application/json'};
+  const tok = cleanTok(tokBox.value) || cleanTok(localStorage.apiToken);
+  if (tok) headers['Authorization'] = 'Bearer ' + tok;
+  const r = await fetch('/auto' + q, {method: 'POST', headers, body: JSON.stringify(body)});
+  const d = await r.json();
+  return {ok: !d.error, err: d.error ? d.error + (r.status === 401 || r.status === 403 ? ' (paste the API_TOKEN from .env in the token box)' : '') : '', d};
+}
+document.querySelectorAll('[data-tapmode]').forEach(b => b.onclick = async () => {
+  const mode = b.dataset.tapmode;
+  if (mode === 'real' && !confirm(`REAL taps with account money: $${document.getElementById('tapstake').value || '?'} per tap on the best cell when its EV is high enough.\nStops at the budget, pauses after a run of losses. Continue?`)) return;
+  const res = await post({tap_live: mode});
+  result(res.ok, res.ok ? `Tap live ${mode.toUpperCase()}` : 'not changed: ' + res.err);
+});
+document.getElementById('setstake').onclick = async () => {
+  const res = await post({tap_stake: parseFloat(document.getElementById('tapstake').value)});
+  result(res.ok, res.ok ? `stake $${res.d.tap_live.stake} per tap` : 'not changed: ' + res.err);
+};
+function live(l) {
+  if (!l) return;
+  document.querySelectorAll('[data-tapmode]').forEach(b => b.classList.toggle('on', b.dataset.tapmode === l.mode));
+  const tag = document.getElementById('modetag');
+  tag.textContent = l.mode === 'real' ? 'LIVE · REAL MONEY' : l.mode === 'demo' ? 'DEMO ACCOUNT' : 'PAPER';
+  tag.style.background = l.mode === 'real' ? '#b4232f' : l.mode === 'demo' ? '#b7791f' : '#2c3440';
+  const sb = document.getElementById('tapstake'); if (document.activeElement !== sb) sb.value = l.stake;
+  const b = l.mode === 'real' ? l.real : l.demo;
+  document.getElementById('livest').innerHTML =
+    `mode <b>${l.mode.toUpperCase()}</b> &middot; stake <b>$${l.stake}</b> &middot; budget -$${l.budget} &middot; min EV ${l.min_ev} &middot; ` +
+    `server/label ratio ${l.ratio ? '<b>' + l.ratio.toFixed(2) + '</b> (' + l.ratios_n + ' orders)' : `<b class="warn">assumed ${l.ratio_boot}</b> until ${l.ratio_min_n} orders (${l.ratios_n} so far)`} &middot; ` +
+    `open taps ${l.open}/${l.max_open}` + (l.paused_s ? ` &middot; <b class="warn">paused ${l.paused_s}s</b>` : '') +
+    (l.stopped ? ` &middot; <b class="down">STOPPED: ${l.stopped.why}</b>` : '') +
+    `<div>why no tap now: <span class="warn">${l.last_reason || '–'}</span></div>`;
+  document.getElementById('livebook').innerHTML = b ?
+    `<div class="row" style="margin-top:4px"><span class="mute">${l.mode === 'real' ? 'REAL' : 'demo'} taps &middot; won</span><span><b>${b.n || 0}</b> &middot; ${b.won || 0}</span></div>` +
+    `<div class="row"><span class="mute">P&amp;L</span><span class="big ${(b.pnl || 0) >= 0 ? 'up' : 'down'}">${usd(b.pnl || 0)}</span></div>` +
+    (l.recent || []).slice(0, 6).map(r => `<div class="res ${r.result === 'WIN' ? 'w' : r.result ? 'l' : ''}"><span>${r.mode || ''} $${r.usd} &times;${r.odds ? r.odds.toFixed(2) : '?'} (label ${r.label ? r.label.toFixed(2) : '?'})</span><b>${r.result || 'open'}</b><span class="m">${r.pnl != null ? usd(r.pnl) : ''}</span></div>`).join('') : '';
+}
 async function tick() {
   let d; try { d = await (await fetch('/tap/state' + q)).json(); } catch (e) { document.getElementById('status').textContent = 'bot not reachable'; return; }
   if (d.error) { document.getElementById('status').textContent = d.error; return; }
+  live(d.live);
   document.getElementById('status').innerHTML = (d.connected ? '<span class="up">● live</span>' : '<span class="down">● no price</span>') +
     ` &middot; ${d.price ? d.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '–'}`;
   const c = d.cfg || {};
