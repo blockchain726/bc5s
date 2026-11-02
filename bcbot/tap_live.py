@@ -137,11 +137,11 @@ class TapLive:
             pass
         st = self.st.get("stopped")
         why = str((st or {}).get("why", ""))
-        if st and ("2024" in why or "not settled 60 s" in why):   # no longer stop conditions (band change under
+        if st and ("2024" in why or "not settled 60 s" in why or "no answer in 5 s" in why):   # no longer stop conditions
             log.warning("Tap live: dropping the old stop %r (no longer a stop condition)", why)   # an order; a
             self.st["stopped"] = None                              # result missed across a restart)
             for o in self.st["orders"].values():
-                if o.get("result") is None and o.get("stale"):
+                if o.get("result") is None and (o.get("stale") or o.get("unknown")):
                     o["result"] = "STALE"
 
     def _save(self) -> None:
@@ -216,8 +216,13 @@ class TapLive:
             return "spacing"
         if len(self.open_orders()) >= self.max_open:
             return f"{self.max_open} taps open"
-        if any(o.get("unknown") for o in self.st["orders"].values()):
-            return "an order without an answer"
+        for o in self.st["orders"].values():        # an unanswered order blocks new taps for 70 s, then is dropped
+            if o.get("unknown") and o.get("result") is None:
+                if now_ms - o["t0"] > 70000:
+                    o["result"] = "STALE"
+                    self._save()
+                else:
+                    return "an order without an answer"
         if self.mode == "real":                   # before TAP_RATIO_MIN_N orders the EV assumes TAP_RATIO_BOOT
             b = self.st["real"]
             at_risk = sum(o.get("usd", self.stake) for o in self.open_orders())
@@ -337,7 +342,10 @@ class TapLive:
             oid = f"unknown-{int(time.time() * 1000)}"
             self.st["orders"][oid] = dict(intent, id=oid, unknown=True, sent=sent["req"], result=None, mode=self.mode)
             self._save()
-            self._stop("an order was sent and got no answer in 5 s: check the page's Positions, then clear it")
+            self._event("no_answer", id=oid, **intent)
+            log.warning("Tap live: an order was sent and got no answer in 5 s (held as unknown for 70 s; see the "
+                        "page's Positions)")
+            self.last_reason = "an order without an answer"
             return
         self.no_request = 0
         try:
