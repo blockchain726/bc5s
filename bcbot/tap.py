@@ -79,6 +79,49 @@ def _mid(ctx) -> bool:
             and abs(ctx["mv2"]) < 0.25 and _range_under(ctx, 4.0))
 
 
+def _load_lr():
+    """The fitted conditional hit model (bcbot/tap_lr.json, written by the research script); None when absent."""
+    try:
+        m = json.loads((Path(__file__).with_name("tap_lr.json")).read_text(encoding="utf-8"))
+        return m if m.get("w") and len(m["w"]) == len(m.get("mu", [])) == len(m.get("sd", [])) else None
+    except (OSError, ValueError):
+        return None
+
+
+LR_MODEL = _load_lr()
+
+
+def _lr_features(c, ctx):
+    """The research model's feature vector for a current-band cell, from the pick context; None when a feature is
+    missing (the first seconds after a start).  Order = the model's "names"."""
+    need = ("pos", "mv2", "mv10", "rng60", "rng300", "trail", "volr")
+    if any(ctx.get(n) is None for n in need):
+        return None
+    pos_c = abs(ctx["pos"] - 0.5)
+    out_move = ctx["mv2"] * (1 if ctx["pos"] >= 0.5 else -1)
+    step = c["hi"] - c["lo"]
+    k = c["k"]
+    return [1.0, pos_c, pos_c * pos_c, abs(ctx["mv2"]), out_move, abs(ctx["mv10"]), min(ctx["rng60"], 20) / 10,
+            min(ctx["rng300"], 60) / 20, ctx["trail"], min(ctx["volr"], 3), math.log(step), k / 5,
+            abs(ctx["mv2"]) * k / 5, pos_c * k / 5]
+
+
+def lr_p_hit(c, ctx) -> float | None:
+    """P(the price touches this current-band cell in its window) from the fitted model, or None."""
+    if LR_MODEL is None:
+        return None
+    f = _lr_features(c, ctx)
+    if f is None:
+        return None
+    z = sum(w * ((v - mu) / sd) for w, v, mu, sd in zip(LR_MODEL["w"], f, LR_MODEL["mu"], LR_MODEL["sd"]))
+    return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+
+
+def _score_lr(c, ctx):
+    p = lr_p_hit(c, ctx) if c["r"] == 0 else None
+    return None if p is None else p * c["odds"] * ctx["pay"](c["k"])
+
+
 def _score_label(c, ctx):
     return c["ev_emp"]                                    # measured hit rate x the grid label (regime factor in)
 
@@ -130,6 +173,11 @@ MODELS = (
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and c["k"] >= 3 and _range_under(x, 6.0)
      and c["hi"] - c["lo"] >= 5 else None,
      "desc": "the same gates as best, at the live bar (label)"},
+    {"name": "lr", "color": "#fb7185", "bar": 1.05, "score": _score_lr,
+     "desc": "fitted hit model (position, moves, ranges, trailing, vol ratio, band, column): P x label x payout >= 1.05"},
+    {"name": "lr-calm", "color": "#38bdf8", "bar": 1.05,
+     "score": lambda c, x: _score_lr(c, x) if _range_under(x, 4.0) else None,
+     "desc": "the fitted model, only while the 60 s range is under 4 bands"},
     {"name": "mid-lo", "color": "#94a3b8", "bar": None,
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and _mid(x) else None,
      "desc": "the live picker with the same mid-band gate"},
@@ -756,13 +804,25 @@ class TapAnalyzer:
             return
         cells = grid.get("cells") or []
         step = (cells[0]["hi"] - cells[0]["lo"]) if cells else None
-        pos = mv2 = None
-        if step:
+        pos = mv2 = mv10 = rng60 = rng300 = None
+        ticks = list(getattr(self, "ticks", None) or ())
+        if step and ticks:
             pos = (price - math.floor(price / step) * step) / step        # where the price sits in its band
-            p2 = next((p for t, p in reversed(getattr(self, "ticks", None) or ()) if t <= now - 2000), None)
+            p2 = next((p for t, p in reversed(ticks) if t <= now - 2000), None)
+            p10 = next((p for t, p in reversed(ticks) if t <= now - 10000), None)
             mv2 = (price - p2) / step if p2 is not None else None          # the last 2 s move, in bands
+            mv10 = (price - p10) / step if p10 is not None else None
+            w60 = [p for t, p in ticks if t >= now - 60000]
+            w300 = [p for t, p in ticks if t >= now - 300000]
+            rng60 = (max(w60) - min(w60)) / step if len(w60) >= 20 else None
+            rng300 = (max(w300) - min(w300)) / step if len(w300) >= 100 else None
+        cfg_vol = (getattr(self, "cfg", None) or {}).get("volatility")
+        vol_real = getattr(self, "vol_real", None)
+        volr = (vol_real / cfg_vol) if vol_real and cfg_vol else 1.0
+        trail = self.regime.get("trailing")
         ctx = {"regime": self.regime, "pay": lv.payout if lv is not None else (lambda k: PAYOUT_FALLBACK),
-               "pos": pos, "mv2": mv2}
+               "pos": pos, "mv2": mv2, "mv10": mv10, "rng60": rng60, "rng300": rng300, "volr": volr,
+               "trail": 0.5 if trail is None else trail}
         taken: dict = {}
         for c in self.paper_pending:
             taken.setdefault(c.get("model", LIVE_MODEL), set()).add(c["t0"])

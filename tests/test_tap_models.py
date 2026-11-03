@@ -55,7 +55,7 @@ def test_each_picker_places_its_own_tap(tmp_path):
                              "best-lo": (4, 0)}
     assert sorted(c["model"] for c in a.paper_pending) == sorted(grid["picks"])
     a._pick_models(grid, 600.0, 102.0)                                   # the same columns again: nothing new
-    assert len(a.paper_pending) == len(MODELS) - 2                       # the mid-band pickers have no ticks here
+    assert len(a.paper_pending) == len(MODELS) - 4                       # mid, mid-lo, lr, lr-calm need ticks
 
 
 def test_mid_band_pickers_need_a_quiet_mid_band_price(tmp_path):
@@ -125,3 +125,26 @@ def test_page_features_the_chosen_picker(tmp_path):
     a.show_model = "mid"                                                 # featuring the live picker: its box shows
     boxes = a.overlay_data()["cells"]
     assert [b["t0"] for b in boxes if b["cls"] == "pick"] == [1000]
+
+
+def test_lr_pickers_follow_the_fitted_model(tmp_path, monkeypatch):
+    import bcbot.tap as tap
+    a = _analyzer(tmp_path)
+    a.ticks = deque([(0.0, 102.0)] + [(100.0 + i * 100.0, 102.0) for i in range(3000)])   # 5 min flat at 102
+    a.cfg = {"volatility": 1e-5}
+    a.vol_real = 5e-6
+    names = ["1", "pos_c", "pos_c^2", "|mv2|", "out_move", "|mv10|", "rng60", "rng300", "trail", "volr",
+             "log step", "k", "|mv2|k", "pos_c k"]
+    monkeypatch.setattr(tap, "LR_MODEL", {"names": names, "w": [0.0] * 14, "mu": [0.0] * 14, "sd": [1.0] * 14})
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, 300100.0, 102.0)
+    assert grid["picks"]["lr"] == (4, 0)                 # P = 0.5 everywhere: 0.5 x 3.8 x 0.75 = 1.43 >= 1.05
+    assert grid["picks"]["lr-calm"] == (4, 0)            # flat 5 minutes: range 0
+    monkeypatch.setattr(tap, "LR_MODEL", None)           # no model file: the lr pickers place nothing
+    a = _analyzer(tmp_path)
+    a.ticks = deque([(0.0, 102.0)] + [(100.0 + i * 100.0, 102.0) for i in range(3000)])
+    a.cfg = {"volatility": 1e-5}
+    a.vol_real = 5e-6
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, 300100.0, 102.0)
+    assert "lr" not in grid["picks"] and "lr-calm" not in grid["picks"]
