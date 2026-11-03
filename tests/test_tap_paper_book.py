@@ -37,6 +37,8 @@ def _analyzer(tmp_path):
     a.pending = []
     a.band_hits = deque(maxlen=200)
     a.model_hour = {}
+    a.model_recent = {}
+    a.show_model = "mid"
     a.models_path = tmp_path / "tap_models.jsonl"
     return a
 

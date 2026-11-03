@@ -29,6 +29,8 @@ def _analyzer(tmp_path, range_bands=2.0):
     a.paper_path = tmp_path / "tap_paper.jsonl"
     a.models_path = tmp_path / "tap_models.jsonl"
     a.model_hour = {}
+    a.model_recent = {}
+    a.show_model = "mid"
     a.stats = {"paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
                "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {}}
     a.grid = None
@@ -98,3 +100,24 @@ def test_candidates_book_in_their_own_books(tmp_path):
     names = [m["name"] for m in a.models_summary()]
     assert names[0] == "label" and len(names) == len(MODELS)
     assert a.models_summary()[1]["hour_n"] == 1
+
+
+def test_page_features_the_chosen_picker(tmp_path):
+    a = _analyzer(tmp_path)
+    a.show_model = "mid"
+    a.cfg = {"timeIncrement": 2}
+    a.ticks = deque([(1000.0, 102.0)])
+    a.grid = {"cells": [], "pick": (2, 0), "picks": {"label": (2, 0), "mid": (4, 0)}, "ev_bar": 1.35}
+    cell = {"t1": 3000, "lo": 100.0, "hi": 105.0, "odds": 3.0, "odds_src": "bc"}
+    a.paper_pending = [dict(cell, t0=1000, model="label"), dict(cell, t0=5000, model="mid"),
+                       dict(cell, t0=5000, model="paid")]
+    a.model_recent = {"mid": deque([{"t0": 0, "lo": 100.0, "hi": 105.0, "k": 3, "r": 0, "odds": 3.0, "hit": True,
+                                     "pnl": 1.1}])}
+    a.paper_recent = deque([{"t0": 0, "lo": 200.0, "hi": 205.0, "k": 3, "r": 0, "odds": 3.0, "hit": False,
+                             "pnl": -1.0}])
+    boxes = a.overlay_data()["cells"]
+    picks = [b for b in boxes if b["cls"] == "pick"]
+    assert len(picks) == 1 and picks[0]["t0"] == 5000 and picks[0]["label"].startswith("MID")
+    assert not any(b["t0"] == 1000 for b in boxes)                      # the live picker's own box is hidden
+    assert [b["cls"] for b in boxes if b["cls"] in ("hit", "miss")] == ["hit"]   # mid's result, not label's
+    assert any(b["cls"] == "mpick" and b["label"] == "paid" for b in boxes)

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 import zlib
 from collections import deque
@@ -375,6 +376,8 @@ class TapAnalyzer:
         self._rec_last = 0.0
         self._rec_tick_t = 0.0
         self.model_hour: dict = {}                         # model -> deque of (settled at, pnl) for the last hour
+        self.model_recent: dict = {}                       # model -> its last 8 settled picks (for the page's boxes)
+        self.show_model = (os.getenv("TAP_SHOW_MODEL") or "mid").strip() or "mid"   # the picker the page features
         self.public_path = log_dir / "tap_public.jsonl"
         self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
                       "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {},
@@ -871,6 +874,9 @@ class TapAnalyzer:
             mb["pnl"] = round(mb["pnl"] + pnl, 4)
             mb["pnl_label"] = round(mb["pnl_label"] + pnl_label, 4)
             self.model_hour.setdefault(model, deque()).append((time.time(), pnl))
+            self.model_recent.setdefault(model, deque(maxlen=8)).append(
+                {"t0": c["t0"], "lo": c["lo"], "hi": c["hi"], "k": c["k"], "r": c["r"], "odds": c["odds"],
+                 "hit": hit, "pnl": pnl})
             if model != "label":                                       # a candidate: its own log, not the paper book
                 rec = {"t": c["created"], "model": model, "k": c["k"], "r": c["r"], "lo": c["lo"], "hi": c["hi"],
                        "t0": c["t0"], "odds": c["odds"], "ev_emp": c.get("ev_emp"), "score": c.get("score"),
@@ -948,7 +954,9 @@ class TapAnalyzer:
         tapped now), the paper tap (yellow), and the last paper taps with HIT / MISS."""
         g, gap = self.grid, self.cfg["timeIncrement"] * 1000
         cells = []
-        pick = tuple(g["pick"]) if g and g.get("pick") else None
+        show = self.show_model
+        picks = (g or {}).get("picks") or {}
+        pick = tuple(picks[show]) if picks.get(show) else (tuple(g["pick"]) if g and g.get("pick") else None)
         for c in (g or {}).get("cells", []):
             if pick == (c["k"], c["r"]):
                 continue
@@ -959,16 +967,19 @@ class TapAnalyzer:
                           "label": f"{ev:.2f}" if ev is not None else "·"})
         colors = {m["name"]: m["color"] for m in MODELS}
         order = {m["name"]: i for i, m in enumerate(MODELS)}
-        for c in self.paper_pending:                          # paper taps still waiting for their window: the paper
-            model = c.get("model", "label")                   # book's in yellow, each candidate picker in its colour
-            if model == "label":                              # (nested outlines when they pick the same cell)
+        for c in self.paper_pending:                          # paper taps still waiting for their window: the
+            model = c.get("model", "label")                   # featured picker's in yellow, the other candidates
+            if model == show:                                 # in their colours (nested when they agree); the live
                 cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "pick",
-                              "label": f"PAPER $1 x{c['odds']:.2f} ({c.get('odds_src', 'port')})"})
+                              "label": f"{show.upper()} $1 x{c['odds']:.2f}"})
+            elif model == "label":                            # picker's own boxes only when it is the featured one
+                continue
             else:
                 cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "mpick",
                               "color": colors.get(model, "#fff"), "inset": 3 * min(order.get(model, 1), 7),
                               "label": model})
-        for r in list(self.paper_recent)[-8:]:                # settled ones, while still on screen
+        recent = self.paper_recent if show == "label" else (self.model_recent.get(show) or ())
+        for r in list(recent)[-8:]:                           # settled ones, while still on screen
             cells.append({"t0": r["t0"], "t1": r["t0"] + gap, "lo": r["lo"], "hi": r["hi"],
                           "cls": "hit" if r["hit"] else "miss",
                           "label": f"HIT {r['pnl']:+.2f}" if r["hit"] else "MISS -1"})
@@ -977,6 +988,10 @@ class TapAnalyzer:
     def panel_html(self) -> str:
         """The left-bar panel on the Tap page, in the same card style as the Up/Down page's."""
         p, pub = self.stats["paper"], self.stats["public"]
+        show = self.show_model
+        if show != "label":
+            p = (self.stats.get("models") or {}).get(show) or {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
+        recent = list(self.paper_recent) if show == "label" else list(self.model_recent.get(show) or ())
         price = self.ticks[-1][1] if self.ticks else None
 
         def usd(v):
@@ -985,7 +1000,7 @@ class TapAnalyzer:
         def row(k, v):
             return f'<div class="row"><span>{k}</span><span>{v}</span></div>'
 
-        pick = next((c for c in reversed(self.paper_pending) if c.get("model", "label") == "label"), None)
+        pick = next((c for c in reversed(self.paper_pending) if c.get("model", "label") == show), None)
         if pick:
             nxt = (f'<div class="big up" style="font-size:20px">+{pick["k"]} col &middot; {pick["r"]:+d} band</div>'
                    f'<div class="mute">x{pick["odds"]:.2f} &middot; our P(hit) {pick["po"]:.0%} &middot; EV {pick["ev"]:.2f} '
@@ -1009,7 +1024,7 @@ class TapAnalyzer:
                          f'<div class="mute">server / label x{lv.ratio() or 0:.2f} &middot; open {len(lv.open_orders())}'
                          f' &middot; losses in a row {b["run"]}</div>'
                          f'<div class="mute">{"STOPPED: " + stop["why"] if stop else (lv.last_reason or "")}</div></div>')
-        n_open = sum(1 for c in self.paper_pending if c.get("model", "label") == "label")
+        n_open = sum(1 for c in self.paper_pending if c.get("model", "label") == show)
         rows_m = "".join(
             f'<div class="row"><span><i style="display:inline-block;width:9px;height:9px;border:2px solid {m["color"]};'
             f'margin-right:5px;vertical-align:middle"></i>{m["name"]}</span>'
@@ -1024,8 +1039,8 @@ class TapAnalyzer:
             f'<div class="res {"w" if r["hit"] else "l"}"><span class="sd">+{r["k"]}c {r["r"]:+d}b</span>'
             f'<b>{"HIT" if r["hit"] else "MISS"}</b><span class="m">{r["pnl"]:+.2f} '
             f'<span class="tag ptag">x{r["odds"]:.2f}</span></span></div>'
-            for r in list(self.paper_recent)[::-1][:6])
-        strip = "".join(f'<i class="{"W" if r["hit"] else "L"}"></i>' for r in list(self.paper_recent)[::-1])
+            for r in recent[::-1][:6])
+        strip = "".join(f'<i class="{"W" if r["hit"] else "L"}"></i>' for r in recent[::-1])
         cfg_usd = self.cfg["volatility"] * price if price else None
         real_usd = self.vol_real * price if price and self.vol_real else None
         ratio = real_usd / cfg_usd if real_usd and cfg_usd else None
@@ -1054,7 +1069,7 @@ class TapAnalyzer:
                '<span class="mode paused">DEMO</span>' if self.live.mode == "demo" else '<span class="mode paper">PAPER</span>')
             + '</div>'
             + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at what bc.game pays (x{self.live.payout(3):.2f} of the label)</span></div>{nxt}</div>'
-            f'<div class="c"><div class="ct"><span>PAPER P&amp;L</span><span class="mute">taps &middot; won</span></div>'
+            f'<div class="c"><div class="ct"><span>PAPER P&amp;L &middot; {show}</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
             f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr} &middot; at the grid label {usd(p.get("pnl_label", 0.0))}</div>{open_row}'
             + (f'<div class="sq">{strip}</div>' if strip else "") + '</div>' + models_card
