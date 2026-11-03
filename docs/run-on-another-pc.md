@@ -47,7 +47,7 @@ http://127.0.0.1:8765/tap (Tap) are up.
 powershell -File tools\supervise.ps1
 ```
 
-restarts the bot 15 s after any exit and writes to `logs\supervisor.log`. An arming survives a restart while its
+restarts the bot 15 s after any exit and writes to `logs\supervisor.log`. `tools\supervise_tap.ps1` does the same for the Tap bot alone (no Up/Down auto mode). An arming survives a restart while its
 4 hours last (`AUTO_RESUME_ARM=1`), the Tap tab opens 25 s after the Up/Down page (`TAP_START_DELAY_S`), and the
 Tap stake and mode set from the page are kept.
 
