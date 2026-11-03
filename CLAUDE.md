@@ -32,8 +32,12 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   ahead, `TapLive.payout`); the P&L at the label is shown alongside. Until 2026-11-02 the book counted the label,
   which is why paper looked profitable (+$588 per $1 on 1,523 picks) while the same taps lost real money (-$42).
 - The bot's own settlement of a cell agrees with bc.game's result in 99% of real orders.
-- Candidate pickers (`MODELS` in `bcbot/tap.py`) run side by side on paper, each with its own book, colour and box
-  on the page; `label` is the live picker. Their books are in `tap_stats.json` ("models") and `logs/tap_models.jsonl`.
+- The Tap picker is the `mid` rule (`LIVE_MODEL` in `bcbot/tap.py`): current band only, price in the middle 60% of
+  its band, moved under a quarter band in the last 2 s, 60 s range under 4 bands, EV at the paid odds >= 1. The
+  live tap takes exactly that pick (`TapLive._choose` has no rule of its own). The old label picker (best EV at the
+  grid label >= 1.35) lost ~8% per $ at the payout and was removed on 2026-11-02 at the owner's request.
+- Candidate pickers (`MODELS`) run side by side on paper, each with its own book, colour and box on the page.
+  Their books are in `tap_stats.json` ("models") and `logs/tap_models.jsonl`; the page features `TAP_SHOW_MODEL`.
 
 ## Commands
 

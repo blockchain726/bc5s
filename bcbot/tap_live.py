@@ -263,21 +263,24 @@ class TapLive:
         return None
 
     def _choose(self, now_ms: float) -> dict | None:
+        """The live tap is the analyzer's pick for this snapshot (its live picker, LIVE_MODEL in tap.py: one cell per
+        column, already past that picker's bar), when the live gates allow: labelled by bc.game, far enough ahead
+        to click, a measured cell kind, and the column not taken yet.  There is no second rule here."""
         g = self.a.grid or {}
-        ratio = self.ratio() or self.ratio_boot
+        pick = g.get("pick")
+        if not pick:
+            return None
         taken = {o["t0"] for o in self.st["orders"].values()}          # one live tap per column
-        best = None
         for c in g.get("cells", []):
+            if (c["k"], c["r"]) != tuple(pick):
+                continue
             if not c.get("tappable") or c.get("odds_src") != "bc" or c["t0"] - now_ms < MIN_AHEAD_MS + self.lead_extra_ms:
-                continue
-            if c.get("p_emp") is None:                        # no measured hit rate for this cell kind: no
-                continue
-            if c["t0"] in taken:
-                continue
-            ev = c["p_emp"] * c["odds"] * ratio               # measured hit rate x label x server/label ratio
-            if ev >= self.min_ev and (best is None or ev > best["ev_exp"]):
-                best = dict(c, ev_exp=round(ev, 4), ratio_used=round(ratio, 4))
-        return best
+                return None
+            if c.get("p_emp") is None or c["t0"] in taken:
+                return None
+            pay = self.payout(c["k"])                         # the EV at what bc.game really pays, for the record
+            return dict(c, ev_exp=round(c["p_emp"] * c["odds"] * pay, 4), ratio_used=round(pay, 4))
+        return None
 
     async def consider(self) -> None:
         """Called after each grid snapshot: maybe place one tap."""
@@ -290,7 +293,7 @@ class TapLive:
             return
         cell = self._choose(now_ms)
         if cell is None:
-            self.last_reason = f"no cell with EV >= {self.min_ev}"
+            self.last_reason = "no live pick this column"
             return
         self.busy = True
         try:

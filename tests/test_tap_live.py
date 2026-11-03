@@ -36,31 +36,31 @@ def test_mode_and_stake_switches(tmp_path, monkeypatch):
     assert lv._why_not(1_000_000.0) == "off"
 
 
-def test_real_taps_bootstrap_with_the_assumed_ratio(tmp_path, monkeypatch):
+def test_live_tap_is_the_analyzers_pick(tmp_path, monkeypatch):
     monkeypatch.setenv("TAP_LIVE", "real")
     monkeypatch.setenv("TAP_STAKE", "0.2")
-    monkeypatch.setenv("TAP_RATIO_BOOT", "0.85")
-    monkeypatch.setenv("TAP_MIN_EV", "1.15")                  # the test's own settings, whatever .env says
-    monkeypatch.setenv("TAP_USE_RATIO", "1")
     lv = TapLive(FakeAnalyzer(), tmp_path)
-    assert lv.ratio() is None
-    assert lv._why_not(1_000_000.0) is None                 # no longer refused for the unknown ratio
-    cell = lv._choose(1_000_000.0)                          # EV = 0.7 x 2.0 x 0.85 = 1.19 >= 1.15
-    assert cell and abs(cell["ev_exp"] - 1.19) < 1e-6 and cell["ratio_used"] == 0.85
-    lv.st["ratios"] = [0.5] * 5                             # measured: the server pays half the label
-    assert lv.ratio() == 0.5 and lv._choose(1_000_000.0) is None
+    assert lv._why_not(1_000_000.0) is None
+    assert lv._choose(1_000_000.0) is None                   # the analyzer picked nothing this column
+    lv.a.grid["pick"] = (2, 0)
+    cell = lv._choose(1_000_000.0)                           # its pick, priced at what bc.game pays 2 columns ahead
+    assert cell and abs(cell["ev_exp"] - 0.7 * 2.0 * lv.payout(2)) < 1e-6 and cell["ratio_used"] == lv.payout(2)
+    lv.a.grid["pick"] = (3, 0)                               # a pick with no such cell: nothing
+    assert lv._choose(1_000_000.0) is None
 
 
-def test_live_skips_uncalibrated_far_cells(tmp_path, monkeypatch):
+def test_live_gates_still_apply_to_the_pick(tmp_path, monkeypatch):
     monkeypatch.setenv("TAP_LIVE", "real")
-    monkeypatch.setenv("TAP_MIN_EV", "1.15"); monkeypatch.setenv("TAP_USE_RATIO", "1"); monkeypatch.setenv("TAP_RATIO_BOOT", "0.85")
     lv = TapLive(FakeAnalyzer(), tmp_path)
-    far = dict(lv.a.grid["cells"][0], r=3, lo=70015.0, hi=70020.0, odds=8.0, po_cal=0.3, p_emp=None)   # not measured
-    lv.a.grid["cells"] = [far]
+    lv.a.grid["pick"] = (2, 0)
+    c = lv.a.grid["cells"][0]
+    c["p_emp"] = None                                        # not a measured cell kind: no
     assert lv._choose(1_000_000.0) is None
-    far["p_emp"] = 0.05                                      # measured: hits 5% -> EV 0.4 x 0.85: no
+    c["p_emp"] = 0.7
+    lv.st["orders"]["x"] = {"t0": c["t0"]}                   # the column already has a live tap: no
     assert lv._choose(1_000_000.0) is None
-    far["p_emp"] = 0.3                                       # measured 30% at x8 -> EV 2.0: yes
+    lv.st["orders"] = {}
+    assert lv._choose(c["t0"] - MIN_AHEAD_MS) is None       # too close to click: no
     assert lv._choose(1_000_000.0) is not None
 
 

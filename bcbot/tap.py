@@ -87,9 +87,13 @@ def _score_paid(c, ctx):
     return c["ev_emp"] * ctx["pay"](c["k"])               # ... x what bc.game's server really pays of the label
 
 
+LIVE_MODEL = "mid"            # the picker that feeds the paper book and whose pick the live tap takes (one per
+                              # column); the owner dropped the old label picker on 2026-11-02 ("totally bad")
 MODELS = (
-    {"name": "label", "color": "#facc15", "bar": None, "score": _score_label,
-     "desc": "the live picker: best EV at the grid label, the live bar (feeds the paper book)"},
+    {"name": "mid", "color": "#facc15", "bar": 1.0,
+     "score": lambda c, x: _score_paid(c, x) if c["r"] == 0 and _mid(x) else None,
+     "desc": "THE picker: current band while the price is mid-band (0.2-0.8), moved < 0.25 band in 2 s, "
+             "60 s range < 4 bands; EV at the paid odds >= 1"},
     {"name": "paid", "color": "#a3e635", "bar": 1.35, "score": _score_paid,
      "desc": "best EV at the paid odds (hit rate x label x payout) >= 1.35"},
     {"name": "paid-lo", "color": "#f472b6", "bar": 1.15, "score": _score_paid,
@@ -126,9 +130,6 @@ MODELS = (
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and c["k"] >= 3 and _range_under(x, 6.0)
      and c["hi"] - c["lo"] >= 5 else None,
      "desc": "the same gates as best, at the live bar (label)"},
-    {"name": "mid", "color": "#fb7185", "bar": 1.0,
-     "score": lambda c, x: _score_paid(c, x) if c["r"] == 0 and _mid(x) else None,
-     "desc": "current band while the price is mid-band (0.2-0.8), moved < 0.25 band in 2 s, range < 4: paid EV >= 1"},
     {"name": "mid-lo", "color": "#94a3b8", "bar": None,
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and _mid(x) else None,
      "desc": "the live picker with the same mid-band gate"},
@@ -377,10 +378,10 @@ class TapAnalyzer:
         self._rec_tick_t = 0.0
         self.model_hour: dict = {}                         # model -> deque of (settled at, pnl) for the last hour
         self.model_recent: dict = {}                       # model -> its last 8 settled picks (for the page's boxes)
-        self.show_model = (os.getenv("TAP_SHOW_MODEL") or "mid").strip() or "mid"   # the picker the page features
+        self.show_model = (os.getenv("TAP_SHOW_MODEL") or LIVE_MODEL).strip() or LIVE_MODEL   # the page's featured one
         self.public_path = log_dir / "tap_public.jsonl"
         self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
-                      "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {},
+                      "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {}, "paper_model": None,
                       "public": {"n": 0, "won": 0, "ret": 0.0, "odds": 0.0, "checked": 0, "agree_tick": 0,
                                  "agree_cross": 0, "odds_checked": 0, "odds_err": 0.0, "by_odds": {}}}
         self.paper_recent: deque = deque(maxlen=12)
@@ -747,7 +748,7 @@ class TapAnalyzer:
 
     def _pick_models(self, grid: dict, now: float, price: float) -> None:
         """Every candidate picker (MODELS) places at most one paper tap per column: its best cell by its own score
-        when that clears its bar.  "label" is the live picker and feeds the paper book; the others only their own
+        when that clears its bar.  LIVE_MODEL is the live picker and feeds the paper book; the others only their own
         books.  Only cell kinds measured at this band size, at bc.game's own label, one per column, and (with live
         taps on) only when the live tap is free to click it, so each box shows exactly where a real tap would go."""
         lv = getattr(self, "live", None)
@@ -764,7 +765,7 @@ class TapAnalyzer:
                "pos": pos, "mv2": mv2}
         taken: dict = {}
         for c in self.paper_pending:
-            taken.setdefault(c.get("model", "label"), set()).add(c["t0"])
+            taken.setdefault(c.get("model", LIVE_MODEL), set()).add(c["t0"])
         for m in MODELS:
             best, best_s = None, None
             for c in grid["cells"]:
@@ -777,7 +778,7 @@ class TapAnalyzer:
             if best is None or best_s < bar or best["odds_src"] != "bc" or best["t0"] in taken.get(m["name"], ()):
                 continue
             grid["picks"][m["name"]] = (best["k"], best["r"])
-            if m["name"] == "label":
+            if m["name"] == LIVE_MODEL:
                 grid["pick"] = (best["k"], best["r"])
             self.paper_pending.append(dict(best, created=now, price=price, model=m["name"], score=round(best_s, 4)))
 
@@ -797,7 +798,7 @@ class TapAnalyzer:
                         "bar": m["bar"] if m["bar"] is not None else self.ev_bar(),
                         **{k: b.get(k) for k in ("bets", "wins", "pnl", "pnl_label", "since")},
                         "hour": round(sum(p for _, p in dq), 4) if dq else 0.0, "hour_n": len(dq) if dq else 0,
-                        "open": sum(1 for c in self.paper_pending if c.get("model", "label") == m["name"]),
+                        "open": sum(1 for c in self.paper_pending if c.get("model", LIVE_MODEL) == m["name"]),
                         "pick": picks.get(m["name"])})
         return out
 
@@ -863,7 +864,7 @@ class TapAnalyzer:
         lv = getattr(self, "live", None)
         for c in pdue:
             hit, _ = touched(ticks, c["lo"], c["hi"], c["t0"], c["t1"])
-            model = c.get("model", "label")
+            model = c.get("model", LIVE_MODEL)
             pay = lv.payout(c["k"]) if lv else PAYOUT_FALLBACK        # bc.game pays this fraction of the grid label
             pnl = round((c["odds"] * pay - 1.0) if hit else -1.0, 4)  # what the server would have paid
             pnl_label = round((c["odds"] - 1.0) if hit else -1.0, 4)  # what the grid label promised (the old P&L)
@@ -877,7 +878,7 @@ class TapAnalyzer:
             self.model_recent.setdefault(model, deque(maxlen=8)).append(
                 {"t0": c["t0"], "lo": c["lo"], "hi": c["hi"], "k": c["k"], "r": c["r"], "odds": c["odds"],
                  "hit": hit, "pnl": pnl})
-            if model != "label":                                       # a candidate: its own log, not the paper book
+            if model != LIVE_MODEL:                                    # a candidate: its own log, not the paper book
                 rec = {"t": c["created"], "model": model, "k": c["k"], "r": c["r"], "lo": c["lo"], "hi": c["hi"],
                        "t0": c["t0"], "odds": c["odds"], "ev_emp": c.get("ev_emp"), "score": c.get("score"),
                        "price": c["price"], "hit": hit, "pnl": pnl, "pnl_label": pnl_label, "pay": round(pay, 3)}
@@ -968,17 +969,17 @@ class TapAnalyzer:
         colors = {m["name"]: m["color"] for m in MODELS}
         order = {m["name"]: i for i, m in enumerate(MODELS)}
         for c in self.paper_pending:                          # paper taps still waiting for their window: the
-            model = c.get("model", "label")                   # featured picker's in yellow, the other candidates
+            model = c.get("model", LIVE_MODEL)                # featured picker's in yellow, the other candidates
             if model == show:                                 # in their colours (nested when they agree); the live
                 cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "pick",
                               "label": f"{show.upper()} $1 x{c['odds']:.2f}"})
-            elif model == "label":                            # picker's own boxes only when it is the featured one
+            elif model == LIVE_MODEL:                         # picker's own boxes only when it is the featured one
                 continue
             else:
                 cells.append({"t0": c["t0"], "t1": c["t1"], "lo": c["lo"], "hi": c["hi"], "cls": "mpick",
                               "color": colors.get(model, "#fff"), "inset": 3 * min(order.get(model, 1), 7),
                               "label": model})
-        recent = self.paper_recent if show == "label" else (self.model_recent.get(show) or ())
+        recent = self.paper_recent if show == LIVE_MODEL else (self.model_recent.get(show) or ())
         for r in list(recent)[-8:]:                           # settled ones, while still on screen
             cells.append({"t0": r["t0"], "t1": r["t0"] + gap, "lo": r["lo"], "hi": r["hi"],
                           "cls": "hit" if r["hit"] else "miss",
@@ -989,9 +990,9 @@ class TapAnalyzer:
         """The left-bar panel on the Tap page, in the same card style as the Up/Down page's."""
         p, pub = self.stats["paper"], self.stats["public"]
         show = self.show_model
-        if show != "label":
+        if show != LIVE_MODEL:
             p = (self.stats.get("models") or {}).get(show) or {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
-        recent = list(self.paper_recent) if show == "label" else list(self.model_recent.get(show) or ())
+        recent = list(self.paper_recent) if show == LIVE_MODEL else list(self.model_recent.get(show) or ())
         price = self.ticks[-1][1] if self.ticks else None
 
         def usd(v):
@@ -1000,7 +1001,7 @@ class TapAnalyzer:
         def row(k, v):
             return f'<div class="row"><span>{k}</span><span>{v}</span></div>'
 
-        pick = next((c for c in reversed(self.paper_pending) if c.get("model", "label") == show), None)
+        pick = next((c for c in reversed(self.paper_pending) if c.get("model", LIVE_MODEL) == show), None)
         if pick:
             nxt = (f'<div class="big up" style="font-size:20px">+{pick["k"]} col &middot; {pick["r"]:+d} band</div>'
                    f'<div class="mute">x{pick["odds"]:.2f} &middot; our P(hit) {pick["po"]:.0%} &middot; EV {pick["ev"]:.2f} '
@@ -1009,7 +1010,7 @@ class TapAnalyzer:
             best = max((c for c in (self.grid or {}).get("cells", []) if c.get("tappable")),
                        key=lambda c: c["ev"], default=None)
             nxt = ('<div class="big mute" style="font-size:20px">NO TAP</div><div class="mute">'
-                   + (f'best cell EV {best.get("ev_emp") or 0:.2f} &lt; {self.ev_bar()} this column' if best else 'waiting for the grid')
+                   + (f'the {show} picker finds no cell this column' if best else 'waiting for the grid')
                    + '</div>')
         wr = f' &middot; won {p["wins"] / p["bets"]:.1%}' if p["bets"] else ""
         lv = self.live
@@ -1024,7 +1025,7 @@ class TapAnalyzer:
                          f'<div class="mute">server / label x{lv.ratio() or 0:.2f} &middot; open {len(lv.open_orders())}'
                          f' &middot; losses in a row {b["run"]}</div>'
                          f'<div class="mute">{"STOPPED: " + stop["why"] if stop else (lv.last_reason or "")}</div></div>')
-        n_open = sum(1 for c in self.paper_pending if c.get("model", "label") == show)
+        n_open = sum(1 for c in self.paper_pending if c.get("model", LIVE_MODEL) == show)
         rows_m = "".join(
             f'<div class="row"><span><i style="display:inline-block;width:9px;height:9px;border:2px solid {m["color"]};'
             f'margin-right:5px;vertical-align:middle"></i>{m["name"]}</span>'
@@ -1068,7 +1069,7 @@ class TapAnalyzer:
             + ('<span class="mode live">LIVE REAL</span>' if self.live.mode == "real" else
                '<span class="mode paused">DEMO</span>' if self.live.mode == "demo" else '<span class="mode paper">PAPER</span>')
             + '</div>'
-            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 when EV &ge; {self.ev_bar()} (the live bar); wins booked at what bc.game pays (x{self.live.payout(3):.2f} of the label)</span></div>{nxt}</div>'
+            + live_card + f'<div class="c"><div class="ct"><span>NEXT TAP</span><span class="mute">$1 by the {show} picker; wins booked at what bc.game pays (x{self.live.payout(3):.2f} of the label)</span></div>{nxt}</div>'
             f'<div class="c"><div class="ct"><span>PAPER P&amp;L &middot; {show}</span><span class="mute">taps &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if p["pnl"] >= 0 else "neg"}">{usd(p["pnl"])}</b>'
             f'<b class="pnl">{p["bets"]} &middot; {p["wins"]}</b></div><div class="mute">$1 per tap{wr} &middot; at the grid label {usd(p.get("pnl_label", 0.0))}</div>{open_row}'
@@ -1165,6 +1166,15 @@ class TapAnalyzer:
         except (OSError, ValueError):
             pass
         self.stats["v"] = STATS_VERSION
+        if self.stats.get("paper_model") != LIVE_MODEL:         # the book follows the live picker: a new one starts
+            if self.stats["paper"].get("bets"):                 # over (the old picker's history stays in the trial)
+                log.info("Tap paper book followed %r, now the live picker is %r: starting over",
+                         self.stats.get("paper_model"), LIVE_MODEL)
+            self.stats["paper"] = {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
+            self.stats["paper_strict"] = {"bets": 0, "wins": 0, "pnl": 0.0}
+            self.paper_recent.clear()
+            self.stats["paper_model"] = LIVE_MODEL
+            self._rebook = False
         try:
             for line in self.paper_path.read_text(encoding="utf-8").splitlines()[-12:]:
                 r = json.loads(line)
@@ -1215,7 +1225,8 @@ class TapAnalyzer:
             "regime": self.regime,
             "models": self.models_summary(),
             "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": self.ev_bar(),
-                      "open": sum(1 for c in self.paper_pending if c.get("model", "label") == "label"), "payout": self.live.payout_table(), "min_ev": self.live.min_ev,
+                      "open": sum(1 for c in self.paper_pending if c.get("model", LIVE_MODEL) == LIVE_MODEL),
+                      "payout": self.live.payout_table(), "min_ev": self.live.min_ev, "model": LIVE_MODEL,
                       "strict": self.stats.get("paper_strict")},
             "public": {**pub, "recent": list(self.public_recent)[::-1],
                        "odds_ratio": float(np.median(self.odds_ratio)) if self.odds_ratio else None},

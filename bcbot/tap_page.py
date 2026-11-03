@@ -148,7 +148,7 @@ function paper(p) {
   const payTxt = ['2', '3', '4'].filter(k => pay[k] != null).map(k => `+${k}c &times;${pay[k].toFixed(2)}`).join(' ');
   const s = p.strict || {};
   document.getElementById('paper').innerHTML =
-    `<div class="ct"><span>PAPER TAPS</span><span class="mute">$1 on the best-EV tappable cell when EV &ge; ${p.ev_min}; a win pays what bc.game's server really pays (${payTxt} of the label, measured on our real orders)</span></div>` +
+    `<div class="ct"><span>PAPER TAPS &middot; ${p.model || 'live picker'}</span><span class="mute">$1 by the live picker: current band only, price mid-band, 2 s move under a quarter band, 60 s range under 4 bands, EV at the paid odds &ge; 1; a win pays what bc.game's server really pays (${payTxt} of the label, measured on our real orders)</span></div>` +
     `<div class="row"><span class="mute">P&amp;L at bc.game's payout</span><span class="mute">taps &middot; won</span></div>` +
     `<div class="row"><span class="big ${p.pnl >= 0 ? 'up' : 'down'}">${usd(p.pnl)}</span><span class="big">${p.bets} &middot; ${p.wins}</span></div>` +
     `<div class="mute">won ${pct(wr)} &middot; at the grid label it would read ${usd(p.pnl_label || 0)} (the old P&amp;L)${p.open ? ` &middot; open ${p.open} tap${p.open > 1 ? 's' : ''} ($${p.open} at risk)` : ''}</div>` +
