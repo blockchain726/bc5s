@@ -64,7 +64,7 @@ def test_each_picker_places_its_own_tap(tmp_path):
                              "best-lo": (4, 0)}
     assert sorted(c["model"] for c in a.paper_pending) == sorted(grid["picks"])
     a._pick_models(grid, 600.0, 102.0)                                   # the same columns again: nothing new
-    assert len(a.paper_pending) == len(MODELS) - 4                       # mid, mid-lo, lr, lr-calm need ticks
+    assert len(a.paper_pending) == len(MODELS) - 6                       # mid, mid-lo, lr, lr-calm, gbm, gbm-safe
 
 
 def test_mid_band_pickers_need_a_quiet_mid_band_price(tmp_path):
@@ -196,3 +196,31 @@ def test_live_model_setting_is_validated_and_kept(tmp_path, monkeypatch):
         lv.set_live_model("nonsense")
     lv2 = TapLive(FakeAnalyzer(), tmp_path)
     assert lv2.live_model == "mid, paid-calm"
+
+
+def test_gbm_pickers_follow_the_model(tmp_path, monkeypatch):
+    class Booster:
+        def predict(self, X):
+            return [0.5] * len(X)                                     # P = 0.5 for every cell
+    feats = ["pos", "mv2", "mv10", "mv30", "rng60", "rng300", "rng900", "volr", "trail", "tick10", "k", "r",
+             "label", "horizon", "toward", "edge_dist", "label_rel", "implied", "logstep"]
+    monkeypatch.setattr(tap_mod, "GBM_MODEL", {"booster": Booster(), "features": feats})
+    a = _analyzer(tmp_path)
+    a.ticks = deque([(float(i * 300), 102.0) for i in range(3200)])     # 16 min flat at 102
+    a.cfg = {"volatility": 1e-5}
+    a.vol_real = 5e-6
+    now = 3200 * 300.0
+    cells = _cells()
+    for c in cells:
+        c["t0"] += now
+    grid = {"cells": cells, "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, now, 102.0)
+    assert grid["picks"]["gbm"] == (4, 0) and grid["picks"]["gbm-safe"] == (4, 0)   # 0.5 x 3.8 x 0.75 = 1.43
+    monkeypatch.setattr(tap_mod, "GBM_MODEL", None)                     # no model: the gbm pickers idle
+    a = _analyzer(tmp_path)
+    a.ticks = deque([(float(i * 300), 102.0) for i in range(3200)])
+    a.cfg = {"volatility": 1e-5}
+    a.vol_real = 5e-6
+    grid = {"cells": cells, "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, now, 102.0)
+    assert "gbm" not in grid["picks"] and "gbm-safe" not in grid["picks"]

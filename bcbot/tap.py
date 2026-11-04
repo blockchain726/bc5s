@@ -117,6 +117,55 @@ def lr_p_hit(c, ctx) -> float | None:
     return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
 
 
+def _load_gbm():
+    """The LightGBM hit model (bcbot/tap_gbm.txt) and its feature order (tap_gbm.json); None when absent or when
+    lightgbm is not installed (the gbm pickers then place nothing)."""
+    try:
+        import lightgbm as lgb
+        here = Path(__file__).parent
+        meta = json.loads((here / "tap_gbm.json").read_text(encoding="utf-8"))
+        return {"booster": lgb.Booster(model_file=str(here / "tap_gbm.txt")), **meta}
+    except Exception:                                   # noqa: BLE001 - optional model
+        return None
+
+
+GBM_MODEL = _load_gbm()
+
+
+def gbm_p_hits(cells, ctx) -> dict:
+    """(k, r) -> P(touch) from the LightGBM model for the tappable, bc.game-labelled cells in the current and the
+    adjacent bands; {} without the model or before 15 min of ticks.  Features exactly as in the research script."""
+    if GBM_MODEL is None or any(ctx.get(n) is None for n in ("pos", "mv2", "mv10", "mv30", "rng60", "rng300",
+                                                              "rng900", "tick10")):
+        return {}
+    lab = {(c["k"], c["r"]): c["odds"] for c in cells if c.get("odds_src") == "bc"}
+    rows, keys = [], []
+    for c in cells:
+        if abs(c["r"]) > 1 or not c.get("tappable") or c.get("odds_src") != "bc":
+            continue
+        k, r, label = c["k"], c["r"], c["odds"]
+        step = c["hi"] - c["lo"]
+        pos = ctx["pos"]
+        nb = [x for x in (lab.get((k, r - 1)), lab.get((k, r + 1))) if x]
+        v = {"pos": pos, "mv2": ctx["mv2"], "mv10": ctx["mv10"], "mv30": ctx["mv30"], "rng60": ctx["rng60"],
+             "rng300": ctx["rng300"], "rng900": ctx["rng900"], "volr": ctx["volr"], "trail": ctx["trail"],
+             "tick10": ctx["tick10"], "k": k, "r": r, "label": label, "horizon": (c["t0"] - ctx["now"]) / 1000.0,
+             "toward": r * ctx["mv2"], "edge_dist": (1 - pos) if r == 1 else pos if r == -1 else min(pos, 1 - pos),
+             "label_rel": label / (sum(nb) / len(nb)) if nb else 1.0, "implied": 1.0 / label,
+             "logstep": math.log(step)}
+        rows.append([v[f] for f in GBM_MODEL["features"]])
+        keys.append((k, r))
+    if not rows:
+        return {}
+    pr = GBM_MODEL["booster"].predict(np.array(rows, dtype=np.float64))
+    return {kr: float(p) for kr, p in zip(keys, pr)}
+
+
+def _score_gbm(c, ctx):
+    p = (ctx.get("p_gbm") or {}).get((c["k"], c["r"]))
+    return None if p is None else p * c["odds"] * ctx["pay"](c["k"])
+
+
 def _score_lr(c, ctx):
     p = lr_p_hit(c, ctx) if c["r"] == 0 else None
     return None if p is None else p * c["odds"] * ctx["pay"](c["k"])
@@ -179,6 +228,11 @@ MODELS = (
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and c["k"] >= 3 and _range_under(x, 6.0)
      and c["hi"] - c["lo"] >= 5 else None,
      "desc": "the same gates as best, at the live bar (label)"},
+    {"name": "gbm", "color": "#f97316", "bar": 1.2, "score": _score_gbm,
+     "desc": "LightGBM hit model (edge distance, moves, ranges, vol ratio, labels), current + adjacent bands: "
+             "P x label x payout >= 1.2"},
+    {"name": "gbm-safe", "color": "#10b981", "bar": 1.3, "score": _score_gbm,
+     "desc": "the same model, EV at the paid odds >= 1.3 (fewer, stronger taps)"},
     {"name": "lr", "color": "#fb7185", "bar": 1.05, "score": _score_lr,
      "desc": "fitted hit model (position, moves, ranges, trailing, vol ratio, band, column): P x label x payout >= 1.05"},
     {"name": "lr-calm", "color": "#38bdf8", "bar": 1.05,
@@ -815,25 +869,32 @@ class TapAnalyzer:
             return
         cells = grid.get("cells") or []
         step = (cells[0]["hi"] - cells[0]["lo"]) if cells else None
-        pos = mv2 = mv10 = rng60 = rng300 = None
+        pos = mv2 = mv10 = mv30 = rng60 = rng300 = rng900 = tick10 = None
         ticks = list(getattr(self, "ticks", None) or ())
         if step and ticks:
             pos = (price - math.floor(price / step) * step) / step        # where the price sits in its band
             p2 = next((p for t, p in reversed(ticks) if t <= now - 2000), None)
             p10 = next((p for t, p in reversed(ticks) if t <= now - 10000), None)
+            p30 = next((p for t, p in reversed(ticks) if t <= now - 30000), None)
             mv2 = (price - p2) / step if p2 is not None else None          # the last 2 s move, in bands
             mv10 = (price - p10) / step if p10 is not None else None
-            w60 = [p for t, p in ticks if t >= now - 60000]
-            w300 = [p for t, p in ticks if t >= now - 300000]
+            mv30 = (price - p30) / step if p30 is not None else None
+            w60 = [p for t, p in ticks if now - 60000 <= t <= now]
+            w300 = [p for t, p in ticks if now - 300000 <= t <= now]
+            w900 = [p for t, p in ticks if now - 900000 <= t <= now]
             rng60 = (max(w60) - min(w60)) / step if len(w60) >= 20 else None
             rng300 = (max(w300) - min(w300)) / step if len(w300) >= 100 else None
+            rng900 = (max(w900) - min(w900)) / step if len(w900) >= 300 else None
+            tick10 = sum(1 for t, _ in ticks if now - 10000 <= t <= now)
         cfg_vol = (getattr(self, "cfg", None) or {}).get("volatility")
         vol_real = getattr(self, "vol_real", None)
         volr = (vol_real / cfg_vol) if vol_real and cfg_vol else 1.0
         trail = self.regime.get("trailing")
         ctx = {"regime": self.regime, "pay": lv.payout if lv is not None else (lambda k: PAYOUT_FALLBACK),
-               "pos": pos, "mv2": mv2, "mv10": mv10, "rng60": rng60, "rng300": rng300, "volr": volr,
-               "trail": 0.5 if trail is None else trail}
+               "pos": pos, "mv2": mv2, "mv10": mv10, "mv30": mv30, "rng60": rng60, "rng300": rng300,
+               "rng900": rng900, "tick10": tick10, "volr": volr, "trail": 0.5 if trail is None else trail,
+               "now": now}
+        ctx["p_gbm"] = gbm_p_hits(cells, ctx)
         taken: dict = {}
         for c in self.paper_pending:
             taken.setdefault(c.get("model", LIVE_MODEL), set()).add(c["t0"])

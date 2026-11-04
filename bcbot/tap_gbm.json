@@ -1,0 +1,27 @@
+{
+ "features": [
+  "pos",
+  "mv2",
+  "mv10",
+  "mv30",
+  "rng60",
+  "rng300",
+  "rng900",
+  "volr",
+  "trail",
+  "tick10",
+  "k",
+  "r",
+  "label",
+  "horizon",
+  "toward",
+  "edge_dist",
+  "label_rel",
+  "implied",
+  "logstep"
+ ],
+ "fitted": "2026-11-04 02:20",
+ "n": 514691,
+ "since": "2026-11-02 12:42",
+ "hit": 0.31477721584406954
+}

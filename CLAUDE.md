@@ -42,12 +42,17 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   Backtest of the selection (11-02/03): 3 h and 6 h windows chase noise; 12 h by per $ works; never rank by total.
 - `bcbot/tap_lr.json` is a fitted conditional hit model (logistic regression on the research record; refit with
   the scratch research script's `--export`); the `lr` / `lr-calm` trial pickers use it. Absent file: they idle.
+- `bcbot/tap_gbm.txt` + `tap_gbm.json` are a LightGBM hit model for the current and adjacent bands (refit with the
+  scratch `tapresearch/research.py --export`); the `gbm` (EV at the paid odds >= 1.2) and `gbm-safe` (>= 1.3) trial
+  pickers use it. Walk-forward 11-02..11-04: gbm-safe +44% per $ on 3,788 taps, 9 of 9 four-hour blocks positive;
+  the strongest features are the distance to the cell's edge, the move toward the cell, the 60 s range and the
+  real/configured volatility. Time of day adds nothing out of sample.
 - Candidate pickers (`MODELS`) run side by side on paper, each with its own book, colour and box on the page.
   Their books are in `tap_stats.json` ("models") and `logs/tap_models.jsonl`; the page features `TAP_SHOW_MODEL`.
 
 ## Commands
 
-- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (61 tests). Check syntax without a pipe
+- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (62 tests). Check syntax without a pipe
   before committing (`python -c "import ast, sys; ast.parse(open(f).read())"`); a piped check hides the exit code.
 - Keep running: `powershell -File tools\supervise.ps1` (log in `logs\supervisor.log`).
 - Git: commit identity `blockchain726 <blockchain726@users.noreply.github.com>`; branch `micro-ensemble`, kept equal
