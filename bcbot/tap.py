@@ -130,6 +130,7 @@ def _score_paid(c, ctx):
     return c["ev_emp"] * ctx["pay"](c["k"])               # ... x what bc.game's server really pays of the label
 
 
+SPLASH_S = 4.0               # how long a picker's row flashes in the panel after one of its taps settles
 LIVE_MODEL = "live"           # the paper book's name: the live tap's picks, i.e. the picks of the pickers the live
                               # tap follows (TAP_LIVE_MODEL: "auto" or a list of names), one per column
 DEFAULT_LIVE_SET = ("mid", "paid-calm", "best")   # followed until the auto ranking has 12 h of data behind it
@@ -1022,7 +1023,7 @@ class TapAnalyzer:
                 self.model_hist.setdefault(model, deque()).append((c["created"], pnl))
             self.model_recent.setdefault(model, deque(maxlen=8)).append(
                 {"t0": c["t0"], "lo": c["lo"], "hi": c["hi"], "k": c["k"], "r": c["r"], "odds": c["odds"],
-                 "hit": hit, "pnl": pnl})
+                 "hit": hit, "pnl": pnl, "at": time.time()})        # "at": when it settled (the panel's splash)
             if model != LIVE_MODEL:                                    # a candidate: its own log, not the paper book
                 rec = {"t": c["created"], "model": model, "k": c["k"], "r": c["r"], "lo": c["lo"], "hi": c["hi"],
                        "t0": c["t0"], "odds": c["odds"], "ev_emp": c.get("ev_emp"), "score": c.get("score"),
@@ -1171,12 +1172,32 @@ class TapAnalyzer:
                          f' &middot; losses in a row {b["run"]}</div>'
                          f'<div class="mute">{"STOPPED: " + stop["why"] if stop else (lv.last_reason or "")}</div></div>')
         n_open = sum(1 for c in self.paper_pending if c.get("model", LIVE_MODEL) == show)
-        rows_m = "".join(
-            f'<div class="row"><span><i style="display:inline-block;width:9px;height:9px;border:2px solid {m["color"]};'
-            f'margin-right:5px;vertical-align:middle"></i>{m["name"]}</span>'
-            f'<span><b class="pnl {"pos" if (m["pnl"] or 0) >= 0 else "neg"}">{usd(m["pnl"] or 0)}</b> '
-            f'<span class="mute">{m["bets"] or 0}t {m["wins"] or 0}w &middot; 1h {m["hour"]:+.1f}</span></span></div>'
-            for m in self.models_summary())
+        def splash(name):
+            """A picker's row flashes for SPLASH_S after one of its taps settles: green with UP and the win, red with
+            DN and the loss, fading out (the panel is redrawn every snapshot, so the fade follows the age)."""
+            last = (self.model_recent.get(name) or [None])[-1]
+            age = time.time() - (last or {}).get("at", 0)
+            if not last or age > SPLASH_S:
+                return "", ""
+            a = 1.0 - age / SPLASH_S
+            rgb = "34,210,122" if last["hit"] else "255,84,104"
+            style = (f'background:rgba({rgb},{0.55 * a:.2f});box-shadow:0 0 {int(14 * a)}px rgba({rgb},{a:.2f});'
+                     f'border-radius:6px;transform:scale({1 + 0.04 * a:.3f});transition:none')
+            tag = (f'<b style="color:rgb({rgb});font-size:{12 + int(5 * a)}px;margin-left:6px;'
+                   f'text-shadow:0 0 6px rgba({rgb},{a:.2f})">'
+                   + (f'&#9650; UP +${last["pnl"]:.2f}' if last["hit"] else f'&#9660; DN -${-last["pnl"]:.2f}') + '</b>')
+            return style, tag
+
+        rows = []
+        for m in self.models_summary():
+            style, tag = splash(m["name"])
+            rows.append(
+                f'<div class="row" style="{style}"><span><i style="display:inline-block;width:9px;height:9px;'
+                f'border:2px solid {m["color"]};margin-right:5px;vertical-align:middle"></i>{m["name"]}'
+                + (' <span class="up" style="font-size:9px">LIVE</span>' if m.get("live") else "") + f'{tag}</span>'
+                f'<span><b class="pnl {"pos" if (m["pnl"] or 0) >= 0 else "neg"}">{usd(m["pnl"] or 0)}</b> '
+                f'<span class="mute">{m["bets"] or 0}t {m["wins"] or 0}w &middot; 1h {m["hour"]:+.1f}</span></span></div>')
+        rows_m = "".join(rows)
         models_card = (f'<div class="c"><div class="ct"><span>PICKERS ON TRIAL</span>'
                        f'<span class="mute">$1 paper each &middot; wins at the paid odds</span></div>{rows_m}</div>')
         open_row = (f'<div class="mute">open: {n_open} tap{"s" if n_open != 1 else ""} &middot; ${n_open:.0f} at risk '
