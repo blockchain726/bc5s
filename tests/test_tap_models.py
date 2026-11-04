@@ -3,13 +3,18 @@
 import json
 from collections import deque
 
+import pytest
+
+import bcbot.tap as tap_mod
 from bcbot.tap import TapAnalyzer, MODELS
+from tests.test_tap_live import FakeAnalyzer
 
 
 class Live:
     mode = "off"
     min_ev = 1.35
     ratio_boot = 1.0
+    live_model = "mid"
 
     def ratio(self):
         return None
@@ -31,6 +36,10 @@ def _analyzer(tmp_path, range_bands=2.0):
     a.model_hour = {}
     a.model_recent = {}
     a.show_model = "mid"
+    a.model_hist = {}
+    a.live_set = ["mid"]
+    a.live_rank_at = 0.0
+    a.live_rank_note = ""
     a.stats = {"paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
                "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {}}
     a.grid = None
@@ -48,7 +57,7 @@ def test_each_picker_places_its_own_tap(tmp_path):
     a = _analyzer(tmp_path)
     grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
     a._pick_models(grid, 500.0, 102.0)
-    assert grid["pick"] is None                                          # the live picker (mid) needs ticks
+    assert grid["pick"] is None                                          # the followed picker (mid) needs ticks
     assert grid["picks"] == {"paid": (4, 0), "paid-lo": (4, 0), "paid-calm": (4, 0),
                              "paid-far": (4, 0), "calm-label": (2, 0), "big-label": (4, 0),
                              "paid-r6": (4, 0), "label-r6": (2, 0), "label-r0": (2, 0), "best": (4, 0),
@@ -64,7 +73,8 @@ def test_mid_band_pickers_need_a_quiet_mid_band_price(tmp_path):
     a.ticks = deque([(0.0, 102.0), (400.0, 102.0)])                      # price 102 in [100, 105): pos 0.4, no move
     a._pick_models(grid, 2500.0, 102.0)
     assert grid["picks"]["mid"] == (4, 0) and grid["picks"]["mid-lo"] == (2, 0)   # paid: 1.425 >= 1; label: A
-    assert grid["pick"] == (4, 0)                                        # mid is the live picker
+    assert grid["pick"] == (4, 0) and grid["live_via"] == "mid"         # the live tap follows mid here
+    assert sum(1 for c in a.paper_pending if c["model"] == "live") == 1
     a = _analyzer(tmp_path)
     a.ticks = deque([(0.0, 100.3), (400.0, 100.3)])                      # moved 0.34 band in 2 s: no
     grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
@@ -90,11 +100,11 @@ def test_candidates_book_in_their_own_books(tmp_path):
     a = _analyzer(tmp_path)
     cell = {"k": 4, "r": 0, "odds": 4.0, "odds_src": "bc", "po": 0.5, "po_cal": 0.5, "ev": 1.5, "ev_emp": 1.9,
             "created": 0, "lo": 100.0, "hi": 105.0, "t0": 1000, "t1": 3000, "price": 102.0}
-    a.paper_pending = [dict(cell, model="mid"), dict(cell, model="paid")]
+    a.paper_pending = [dict(cell, model="live", via="mid"), dict(cell, model="paid")]
     a.ticks = deque([(0, 102.0), (2000, 102.0), (4500, 102.0)])            # a HIT for both
     a._settle()
     assert a.stats["paper"]["bets"] == 1                                 # only the live picker feeds the paper book
-    assert a.stats["models"]["mid"]["bets"] == 1 and a.stats["models"]["paid"]["bets"] == 1
+    assert a.stats["models"]["live"]["bets"] == 1 and a.stats["models"]["paid"]["bets"] == 1
     assert abs(a.stats["models"]["paid"]["pnl"] - (4.0 * 0.75 - 1.0)) < 1e-9   # at the paid odds
     assert json.loads(a.models_path.read_text(encoding="utf-8").splitlines()[0])["model"] == "paid"
     assert len(a.paper_path.read_text(encoding="utf-8").splitlines()) == 1
@@ -105,12 +115,12 @@ def test_candidates_book_in_their_own_books(tmp_path):
 
 def test_page_features_the_chosen_picker(tmp_path):
     a = _analyzer(tmp_path)
-    a.show_model = "paid"                                                # feature a candidate, not the live picker
+    a.show_model = "paid"                                                # feature a candidate, not the live book
     a.cfg = {"timeIncrement": 2}
     a.ticks = deque([(1000.0, 102.0)])
     a.grid = {"cells": [], "pick": (2, 0), "picks": {"mid": (2, 0), "paid": (4, 0)}, "ev_bar": 1.35}
     cell = {"t1": 3000, "lo": 100.0, "hi": 105.0, "odds": 3.0, "odds_src": "bc"}
-    a.paper_pending = [dict(cell, t0=1000, model="mid"), dict(cell, t0=5000, model="paid"),
+    a.paper_pending = [dict(cell, t0=1000, model="live", via="mid"), dict(cell, t0=5000, model="paid"),
                        dict(cell, t0=5000, model="big-label")]
     a.model_recent = {"paid": deque([{"t0": 0, "lo": 100.0, "hi": 105.0, "k": 3, "r": 0, "odds": 3.0, "hit": True,
                                       "pnl": 1.1}])}
@@ -122,7 +132,7 @@ def test_page_features_the_chosen_picker(tmp_path):
     assert not any(b["t0"] == 1000 for b in boxes)                      # the live picker's own box is hidden
     assert [b["cls"] for b in boxes if b["cls"] in ("hit", "miss")] == ["hit"]   # paid's result, not the book's
     assert any(b["cls"] == "mpick" and b["label"] == "big-label" for b in boxes)
-    a.show_model = "mid"                                                 # featuring the live picker: its box shows
+    a.show_model = "live"                                                # featuring the live book: its box shows
     boxes = a.overlay_data()["cells"]
     assert [b["t0"] for b in boxes if b["cls"] == "pick"] == [1000]
 
@@ -148,3 +158,41 @@ def test_lr_pickers_follow_the_fitted_model(tmp_path, monkeypatch):
     grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
     a._pick_models(grid, 300100.0, 102.0)
     assert "lr" not in grid["picks"] and "lr-calm" not in grid["picks"]
+
+
+def test_live_follows_the_ranked_set(tmp_path):
+    a = _analyzer(tmp_path)
+    a.live.live_model = "auto"
+    a.live_set = list(tap_mod.DEFAULT_LIVE_SET)
+    a.live_rank_at = 0.0
+    a.live_rank_note = ""
+    now = 10 * 3600 * 1000.0
+    a.model_hist = {"paid": deque([(now - 1000 * i, 0.5) for i in range(40)]),            # +50% per $, 40 taps
+                    "mid": deque([(now - 1000 * i, 0.2) for i in range(40)]),             # +20%
+                    "best": deque([(now - 1000 * i, -0.1) for i in range(40)]),           # -10%
+                    "lr": deque([(now - 1000 * i, 0.9) for i in range(10)])}              # too few taps: ignored
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, now, 102.0)
+    assert a.live_set == ["paid", "mid", "best"]                       # ranked per $, top 3 with 30+ taps
+    assert grid["pick"] == (4, 0) and grid["live_via"] == "paid"       # the best-ranked picker's cell
+    live = [c for c in a.paper_pending if c["model"] == "live"]
+    assert len(live) == 1 and live[0]["via"] == "paid" and live[0]["t0"] == 5000
+    a.live.live_model = "mid"                                          # a fixed choice: mid's pick instead
+    a.paper_pending = []
+    grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
+    a.ticks = deque([(0.0, 102.0), (now - 2500, 102.0)])
+    a._pick_models(grid, now, 102.0)
+    assert a.live_set == ["mid"] and grid["pick"] == (4, 0) and grid["live_via"] == "mid"
+
+
+def test_live_model_setting_is_validated_and_kept(tmp_path, monkeypatch):
+    monkeypatch.delenv("TAP_LIVE", raising=False)
+    from bcbot.tap_live import TapLive
+    lv = TapLive(FakeAnalyzer(), tmp_path)
+    assert lv.live_model == "auto"
+    lv.a.model_names = lambda: {"mid", "paid-calm"}
+    assert lv.set_live_model("mid, paid-calm").endswith("mid, paid-calm")
+    with pytest.raises(ValueError):
+        lv.set_live_model("nonsense")
+    lv2 = TapLive(FakeAnalyzer(), tmp_path)
+    assert lv2.live_model == "mid, paid-calm"

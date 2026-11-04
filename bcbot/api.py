@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 
 
 def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Application:
-    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run", "ladder", "tap_live", "tap_stake", "tap_clear")
+    MONEY_KEYS = ("arm", "live", "kill", "clear", "reset_run", "ladder", "tap_live", "tap_stake", "tap_clear",
+                  "tap_live_model")
 
     def money_auth(request: web.Request) -> web.Response | None:
         """The token check for anything that can arm, disarm or spend: refused without a configured token."""
@@ -108,6 +109,15 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                     raise TradeError("the Tap analyzer is not running (start without --no-tap)")
                 tap.reset_models()
                 return web.json_response({"ok": True, "models": tap.models_summary()})
+            if "tap_live_model" in body:                                          # which pickers the live tap follows
+                if tap is None:
+                    raise TradeError("the Tap analyzer is not running (start without --no-tap)")
+                try:
+                    msg = tap.live.set_live_model(str(body["tap_live_model"]), who="api")
+                except ValueError as e:
+                    raise TradeError(str(e))
+                tap.live_rank_at = 0.0                                           # re-rank at the next snapshot
+                return web.json_response({"ok": True, "message": msg})
             if "tap_live" in body or "tap_stake" in body or body.get("tap_clear"):   # live taps (Tap page)
                 if tap is None:
                     raise TradeError("the Tap analyzer is not running (start without --no-tap)")

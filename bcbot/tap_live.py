@@ -123,6 +123,7 @@ class TapLive:
             self.stake = float(saved["stake"])
         if saved.get("mode") in ("off", "demo", "real"):
             self.mode = saved["mode"]
+        self.live_model = str(saved.get("live_model") or _flag("TAP_LIVE_MODEL", "auto")).strip() or "auto"
         self.busy = False
         self.last_at = 0.0
         self.paused_until = 0.0
@@ -524,6 +525,22 @@ class TapLive:
                   f", ratio assumed {self.ratio_boot:.2f} until {self.ratio_min_n} orders"))
         log.warning(msg)
         return msg
+
+    def set_live_model(self, value: str, who: str = "operator") -> str:
+        """Which pickers the live tap follows: "auto" (the best 3 of the last 12 h by return per $, hourly) or a
+        comma-separated list of picker names.  Kept across restarts.  Logged."""
+        value = (value or "").strip().lower() or "auto"
+        names = getattr(getattr(self, "a", None), "model_names", lambda: None)()
+        if value != "auto":
+            bad = [n.strip() for n in value.split(",") if names is not None and n.strip() not in names]
+            if bad or not value.replace(",", "").replace("-", "").replace(" ", "").isalnum():
+                raise ValueError(f"unknown picker(s): {', '.join(bad) or value}; use 'auto' or names from the trial table")
+        was, self.live_model = self.live_model, value
+        self.st.setdefault("settings", {})["live_model"] = value
+        self._save()
+        self._event("live_model", was=was, value=value, who=who)
+        log.warning("Tap live picks follow %r (was %r)", value, was)
+        return f"Tap live picker: {value}"
 
     def set_stake(self, usd: float, who: str = "operator") -> str:
         """The stake per tap, $0.1 to $5, at runtime.  Logged."""

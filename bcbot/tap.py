@@ -130,8 +130,13 @@ def _score_paid(c, ctx):
     return c["ev_emp"] * ctx["pay"](c["k"])               # ... x what bc.game's server really pays of the label
 
 
-LIVE_MODEL = "mid"            # the picker that feeds the paper book and whose pick the live tap takes (one per
-                              # column); the owner dropped the old label picker on 2026-11-02 ("totally bad")
+LIVE_MODEL = "live"           # the paper book's name: the live tap's picks, i.e. the picks of the pickers the live
+                              # tap follows (TAP_LIVE_MODEL: "auto" or a list of names), one per column
+DEFAULT_LIVE_SET = ("mid", "paid-calm", "best")   # followed until the auto ranking has 12 h of data behind it
+LIVE_RANK_WINDOW_S = 12 * 3600 # the auto ranking: return per $ over this window ...
+LIVE_RANK_MIN_TAPS = 30        # ... for pickers with at least this many settled taps in it ...
+LIVE_RANK_TOP = 3              # ... the best this many are followed, re-ranked every hour
+LIVE_RANK_EVERY_S = 3600
 MODELS = (
     {"name": "mid", "color": "#facc15", "bar": 1.0,
      "score": lambda c, x: _score_paid(c, x) if c["r"] == 0 and _mid(x) else None,
@@ -427,6 +432,10 @@ class TapAnalyzer:
         self.model_hour: dict = {}                         # model -> deque of (settled at, pnl) for the last hour
         self.model_recent: dict = {}                       # model -> its last 8 settled picks (for the page's boxes)
         self.show_model = (os.getenv("TAP_SHOW_MODEL") or LIVE_MODEL).strip() or LIVE_MODEL   # the page's featured one
+        self.model_hist: dict = {}                         # model -> deque of (settled at ms, pnl), the last 12 h
+        self.live_set: list = list(DEFAULT_LIVE_SET)       # the pickers the live tap follows now, best first
+        self.live_rank_at = 0.0
+        self.live_rank_note = "default set"
         self.public_path = log_dir / "tap_public.jsonl"
         self.stats = {"since": time.time(), "cells": {}, "ev": {}, "paper": {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0},
                       "paper_strict": {"bets": 0, "wins": 0, "pnl": 0.0}, "models": {}, "paper_model": None,
@@ -455,6 +464,7 @@ class TapAnalyzer:
         self.live = TapLive(self, log_dir)
         if getattr(self, "_rebook", False):
             self._rebook_paper()                           # the saved paper book was priced at the grid label
+        self._load_model_hist()
 
     # ---------- the Tap tab ----------
 
@@ -838,9 +848,81 @@ class TapAnalyzer:
             if best is None or best_s < bar or best["odds_src"] != "bc" or best["t0"] in taken.get(m["name"], ()):
                 continue
             grid["picks"][m["name"]] = (best["k"], best["r"])
-            if m["name"] == LIVE_MODEL:
-                grid["pick"] = (best["k"], best["r"])
             self.paper_pending.append(dict(best, created=now, price=price, model=m["name"], score=round(best_s, 4)))
+        # the live pick: the highest-ranked followed picker that picked a column the live book has not taken yet
+        self.rank_live_set(now)
+        for name in self.live_set:
+            cell = next((c for c in self.paper_pending if c.get("model") == name and c["created"] == now), None)
+            if cell is None or cell["t0"] in taken.get(LIVE_MODEL, ()):
+                continue
+            grid["pick"] = (cell["k"], cell["r"])
+            grid["live_via"] = name
+            self.paper_pending.append(dict(cell, model=LIVE_MODEL, via=name))
+            break
+
+    @staticmethod
+    def model_names() -> set:
+        return {m["name"] for m in MODELS}
+
+    def live_setting(self) -> str:
+        lv = getattr(self, "live", None)
+        return (getattr(lv, "live_model", None) or "auto").strip() or "auto"
+
+    def rank_live_set(self, now_ms: float) -> None:
+        """Which pickers the live tap follows.  A fixed list when the setting names them; otherwise ("auto") the
+        LIVE_RANK_TOP pickers with the best return per $ over the last LIVE_RANK_WINDOW_S (LIVE_RANK_MIN_TAPS or more
+        settled taps), re-ranked every LIVE_RANK_EVERY_S; DEFAULT_LIVE_SET until any picker has enough history."""
+        setting = self.live_setting()
+        names = {m["name"] for m in MODELS}
+        if setting != "auto":
+            wanted = [n.strip() for n in setting.split(",") if n.strip() in names]
+            new, note = (wanted or list(DEFAULT_LIVE_SET)), ("fixed" if wanted else "default set (no valid names)")
+        else:
+            if now_ms - self.live_rank_at < LIVE_RANK_EVERY_S * 1000 and self.live_rank_at:
+                return
+            self.live_rank_at = now_ms
+            ranked = []
+            for m in MODELS:
+                dq = self.model_hist.get(m["name"])
+                if not dq:
+                    continue
+                while dq and dq[0][0] < now_ms - LIVE_RANK_WINDOW_S * 1000:
+                    dq.popleft()
+                if len(dq) >= LIVE_RANK_MIN_TAPS:
+                    ranked.append((sum(p for _, p in dq) / len(dq), len(dq), m["name"]))
+            ranked.sort(key=lambda r: -r[0])
+            if ranked:
+                new = [n for _, _, n in ranked[:LIVE_RANK_TOP]]
+                note = "auto: " + ", ".join(f"{n} {100 * r:+.0f}%/{k}" for r, k, n in ranked[:LIVE_RANK_TOP])
+            else:
+                new, note = list(DEFAULT_LIVE_SET), "default set (no picker has 12 h of taps yet)"
+        if new != self.live_set:
+            log.info("Tap live picks follow %s (%s)", " + ".join(new), note)
+        self.live_set, self.live_rank_note = new, note
+
+    def _load_model_hist(self) -> None:
+        """The last 12 h of every picker's settled taps from the logs, so the auto ranking survives a restart."""
+        since = time.time() * 1000 - LIVE_RANK_WINDOW_S * 1000
+        for path, default in ((self.models_path, None), (self.paper_path, "mid")):
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(0, 2)
+                    fh.seek(max(0, fh.tell() - 40_000_000))
+                    lines = fh.read().decode("utf-8", "replace").split("\n")[1:]
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                m = r.get("model") or default
+                if r.get("hit") is None or r.get("t", 0) < since or not m or m == LIVE_MODEL or "pnl" not in r:
+                    continue
+                self.model_hist.setdefault(m, deque()).append((r["t"], r["pnl"]))
+        for dq in self.model_hist.values():
+            dq = deque(sorted(dq))
+        log.info("Tap pickers' 12 h history loaded: %s", {m: len(d) for m, d in self.model_hist.items()})
 
     def models_summary(self) -> list:
         """The candidate pickers side by side: colour, rule, book (wins at bc.game's payout), the last hour, and
@@ -859,7 +941,8 @@ class TapAnalyzer:
                         **{k: b.get(k) for k in ("bets", "wins", "pnl", "pnl_label", "since")},
                         "hour": round(sum(p for _, p in dq), 4) if dq else 0.0, "hour_n": len(dq) if dq else 0,
                         "open": sum(1 for c in self.paper_pending if c.get("model", LIVE_MODEL) == m["name"]),
-                        "pick": picks.get(m["name"])})
+                        "pick": picks.get(m["name"]), "live": m["name"] in self.live_set,
+                        "live_rank": self.live_set.index(m["name"]) + 1 if m["name"] in self.live_set else None})
         return out
 
     def reset_models(self) -> None:
@@ -935,6 +1018,8 @@ class TapAnalyzer:
             mb["pnl"] = round(mb["pnl"] + pnl, 4)
             mb["pnl_label"] = round(mb["pnl_label"] + pnl_label, 4)
             self.model_hour.setdefault(model, deque()).append((time.time(), pnl))
+            if model != LIVE_MODEL:
+                self.model_hist.setdefault(model, deque()).append((c["created"], pnl))
             self.model_recent.setdefault(model, deque(maxlen=8)).append(
                 {"t0": c["t0"], "lo": c["lo"], "hi": c["hi"], "k": c["k"], "r": c["r"], "odds": c["odds"],
                  "hit": hit, "pnl": pnl})
@@ -960,7 +1045,7 @@ class TapAnalyzer:
                    "odds": c["odds"], "odds_src": c.get("odds_src"), "odds_port": c.get("odds_port"),
                    "po": c["po"], "po_cal": c.get("po_cal"), "ev": c["ev"], "ev_emp": c.get("ev_emp"),
                    "price": c["price"], "hit": hit, "pnl": pnl, "pnl_label": pnl_label, "pay": round(pay, 3),
-                   "strict": strict, "v": STATS_VERSION}
+                   "strict": strict, "model": LIVE_MODEL, "via": c.get("via"), "v": STATS_VERSION}
             self.paper_recent.append(rec)
             with open(self.paper_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(rec) + "\n")
@@ -1287,7 +1372,9 @@ class TapAnalyzer:
             "paper": {**self.stats["paper"], "recent": list(self.paper_recent)[::-1], "ev_min": self.ev_bar(),
                       "open": sum(1 for c in self.paper_pending if c.get("model", LIVE_MODEL) == LIVE_MODEL),
                       "payout": self.live.payout_table(), "min_ev": self.live.min_ev, "model": LIVE_MODEL,
-                      "strict": self.stats.get("paper_strict")},
+                      "strict": self.stats.get("paper_strict"), "live_set": self.live_set,
+                      "live_setting": self.live_setting(), "live_note": self.live_rank_note,
+                      "live_via": (self.grid or {}).get("live_via")},
             "public": {**pub, "recent": list(self.public_recent)[::-1],
                        "odds_ratio": float(np.median(self.odds_ratio)) if self.odds_ratio else None},
         }

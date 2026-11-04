@@ -128,19 +128,30 @@ function ev(rows) {
     `<td>${pct(s.pm)}</td><td>×${s.odds.toFixed(2)}</td><td style="${shade(s.ret, s.n)}">${sgn(s.ret)}</td></tr>`).join('');
 }
 const MODEL_COLORS = {};
-function models(ms) {
+function models(ms, paper) {
   if (!ms.length) return;
   ms.forEach(m => MODEL_COLORS[m.name] = m.color);
   const since = ms.map(m => m.since).filter(Boolean);
   const t0 = since.length ? new Date(Math.min(...since) * 1000).toLocaleTimeString() : '–';
+  const p = paper || {};
+  const liveTxt = (p.live_set || []).join(' + ') || '–';
+  const cur = document.getElementById('livemodel') ? document.getElementById('livemodel').value : null;
   document.getElementById('models').innerHTML =
     `<div class="ct"><span>PICKERS ON TRIAL</span><span class="mute">$1 paper per tap each, wins at bc.game's payout, since ${t0} &middot; <a href="#" id="mreset" style="color:#5aa9ff">reset books</a></span></div>` +
+    `<div class="row" style="margin:4px 0"><span>the live tap follows <b class="up">${liveTxt}</b> <span class="mute">(${p.live_setting || 'auto'}: ${p.live_note || ''})</span></span>` +
+    `<span><input id="livemodel" placeholder="auto or names, e.g. mid,paid-calm" title="auto = the best 3 pickers of the last 12 h by return per $, re-ranked hourly; or a comma-separated list of picker names" style="font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:3px 6px;width:220px"> <button id="livemodelset" style="font:inherit;padding:3px 8px">set</button></span></div>` +
     `<table><tr><th style="text-align:left">picker</th><th>taps</th><th>won</th><th>P&amp;L</th><th>per $</th><th>last 1 h</th><th>now</th></tr>` +
-    ms.map(m => `<tr><td style="text-align:left"><i style="display:inline-block;width:10px;height:10px;border:2px solid ${m.color};margin-right:6px;vertical-align:middle"></i><b>${m.name}</b><div class="mute" style="font-size:10px">${m.desc}</div></td>` +
+    ms.map(m => `<tr><td style="text-align:left"><i style="display:inline-block;width:10px;height:10px;border:2px solid ${m.color};margin-right:6px;vertical-align:middle"></i><b>${m.name}</b>${m.live ? ` <span class="up" style="font-size:10px">LIVE #${m.live_rank}</span>` : ''}<div class="mute" style="font-size:10px">${m.desc}</div></td>` +
       `<td>${m.bets || 0}</td><td>${m.bets ? pct(m.wins / m.bets) : '–'}</td><td class="${(m.pnl || 0) >= 0 ? 'up' : 'down'}">${usd(m.pnl || 0)}</td>` +
       `<td>${m.bets ? ((100 * (m.pnl || 0)) / m.bets).toFixed(0) + '%' : '–'}</td><td class="${(m.hour || 0) >= 0 ? 'up' : 'down'}">${usd(m.hour || 0)} <span class="mute">(${m.hour_n || 0})</span></td>` +
       `<td>${m.pick ? `+${m.pick[0]}c ${m.pick[1] >= 0 ? '+' : ''}${m.pick[1]}b` : (m.open ? 'open ' + m.open : '–')}</td></tr>`).join('') + `</table>`;
   document.getElementById('mreset').onclick = async e => { e.preventDefault(); if (confirm('Reset the trial books?')) await post({tap_models_reset: 1}); };
+  if (cur !== null) document.getElementById('livemodel').value = cur;
+  document.getElementById('livemodelset').onclick = async () => {
+    const r = await post({tap_live_model: document.getElementById('livemodel').value || 'auto'});
+    document.getElementById('livemodel').value = '';
+    if (!r.ok) alert(r.err);
+  };
 }
 function paper(p) {
   const wr = p.bets ? p.wins / p.bets : null;
@@ -148,7 +159,7 @@ function paper(p) {
   const payTxt = ['2', '3', '4'].filter(k => pay[k] != null).map(k => `+${k}c &times;${pay[k].toFixed(2)}`).join(' ');
   const s = p.strict || {};
   document.getElementById('paper').innerHTML =
-    `<div class="ct"><span>PAPER TAPS &middot; ${p.model || 'live picker'}</span><span class="mute">$1 by the live picker: current band only, price mid-band, 2 s move under a quarter band, 60 s range under 4 bands, EV at the paid odds &ge; 1; a win pays what bc.game's server really pays (${payTxt} of the label, measured on our real orders)</span></div>` +
+    `<div class="ct"><span>PAPER TAPS &middot; the live tap's picks</span><span class="mute">$1 per tap, the picks of the pickers the live tap follows (${(p.live_set || []).join(' + ') || '–'}; each column once, best-ranked picker first); a win pays what bc.game's server really pays (${payTxt} of the label, measured on our real orders)</span></div>` +
     `<div class="row"><span class="mute">P&amp;L at bc.game's payout</span><span class="mute">taps &middot; won</span></div>` +
     `<div class="row"><span class="big ${p.pnl >= 0 ? 'up' : 'down'}">${usd(p.pnl)}</span><span class="big">${p.bets} &middot; ${p.wins}</span></div>` +
     `<div class="mute">won ${pct(wr)} &middot; at the grid label it would read ${usd(p.pnl_label || 0)} (the old P&amp;L)${p.open ? ` &middot; open ${p.open} tap${p.open > 1 ? 's' : ''} ($${p.open} at risk)` : ''}</div>` +
@@ -249,7 +260,7 @@ async function tick() {
     `than their multiplier prices in, far cells less often. Statistics since ${new Date(d.since * 1000).toLocaleString()}.</div>`;
   const rg = d.regime || {};
   document.getElementById('info').innerHTML += `<div style="margin-top:4px">regime now: <b>${rg.name || '?'}</b> &middot; last 60 current-band taps hit ${rg.trailing != null ? Math.round(100 * rg.trailing) + '%' : '–'} &middot; 60 s price range ${rg.range_bands != null ? rg.range_bands + ' bands' : '–'} &middot; hit-rate factor <b>${rg.factor}</b> <span class="mute">(calm+hot 1.20 &middot; calm+cold 1.04 &middot; wild+hot 0.94 &middot; wild+cold 0.76, from 70k measured taps)</span></div>`;
-  models(d.models || []); grid(d.grid); cells(d.cells || []); ev(d.ev || []); paper(d.paper || {}); pub(d.public || {});
+  models(d.models || [], d.paper || {}); grid(d.grid); cells(d.cells || []); ev(d.ev || []); paper(d.paper || {}); pub(d.public || {});
 }
 tick(); setInterval(tick, 1000);
 </script></body></html>"""
