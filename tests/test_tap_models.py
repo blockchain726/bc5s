@@ -70,7 +70,7 @@ def test_each_picker_places_its_own_tap(tmp_path):
 def test_mid_band_pickers_need_a_quiet_mid_band_price(tmp_path):
     a = _analyzer(tmp_path)
     grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
-    a.ticks = deque([(0.0, 102.0), (400.0, 102.0)])                      # price 102 in [100, 105): pos 0.4, no move
+    a.ticks = deque([(float(i * 10), 102.0) for i in range(41)])          # price 102 in [100, 105): pos 0.4, no move
     a._pick_models(grid, 2500.0, 102.0)
     assert grid["picks"]["mid"] == (4, 0) and grid["picks"]["mid-lo"] == (2, 0)   # paid: 1.425 >= 1; label: A
     assert grid["pick"] == (4, 0) and grid["live_via"] == "mid"         # the live tap follows mid here
@@ -171,6 +171,7 @@ def test_live_follows_the_ranked_set(tmp_path):
                     "mid": deque([(now - 1000 * i, 0.2) for i in range(40)]),             # +20%
                     "best": deque([(now - 1000 * i, -0.1) for i in range(40)]),           # -10%
                     "lr": deque([(now - 1000 * i, 0.9) for i in range(10)])}              # too few taps: ignored
+    a.ticks = deque([(now - 30000 + i * 1000.0, 102.0) for i in range(29)])       # a quiet half minute
     grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
     a._pick_models(grid, now, 102.0)
     assert a.live_set == ["paid", "mid", "best"]                       # ranked per $, top 3 with 30+ taps
@@ -180,7 +181,7 @@ def test_live_follows_the_ranked_set(tmp_path):
     a.live.live_model = "mid"                                          # a fixed choice: mid's pick instead
     a.paper_pending = []
     grid = {"cells": _cells(), "pick": None, "picks": {}, "ev_bar": 1.35}
-    a.ticks = deque([(0.0, 102.0), (now - 2500, 102.0)])
+    a.ticks = deque([(now - 30000 + i * 1000.0, 102.0) for i in range(29)])
     a._pick_models(grid, now, 102.0)
     assert a.live_set == ["mid"] and grid["pick"] == (4, 0) and grid["live_via"] == "mid"
 
@@ -224,3 +225,19 @@ def test_gbm_pickers_follow_the_model(tmp_path, monkeypatch):
     grid = {"cells": cells, "pick": None, "picks": {}, "ev_bar": 1.35}
     a._pick_models(grid, now, 102.0)
     assert "gbm" not in grid["picks"] and "gbm-safe" not in grid["picks"]
+
+
+def test_no_live_pick_in_a_wild_minute(tmp_path):
+    a = _analyzer(tmp_path)
+    a.live.live_model = "paid"                                         # a picker without a calm gate
+    a.ticks = deque([(float(i * 500), 102.0 + (60.0 if i % 2 else 0.0)) for i in range(200)])   # 60 = 12 bands
+    now = 200 * 500.0
+    cells = _cells()
+    for c in cells:
+        c["t0"] += now
+    grid = {"cells": cells, "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, now, 102.0)
+    assert "paid" in grid["picks"]                                     # the trial picker still books its paper tap
+    assert grid["pick"] is None and grid["live_skip"] == "market too wild"
+    assert not any(c["model"] == "live" for c in a.paper_pending)
+

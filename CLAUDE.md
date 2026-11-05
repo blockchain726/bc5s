@@ -36,7 +36,8 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   `auto` = every hour the 3 pickers with the best return per $ over the last 12 h (30+ taps each; `rank_live_set`),
   else a list of names. Each snapshot the live pick is the best-ranked followed picker's pick for a free column; the
   paper book (`LIVE_MODEL = "live"`) records exactly those, so paper stays one-to-one with real orders.
-  `TapLive._choose` has no rule of its own. The `mid` rule (current band, price mid-band, 2 s move under a quarter
+  `TapLive._choose` has no rule of its own. No live pick while the last minute's range is 10 bands or more
+  (`LIVE_MAX_RANGE60`): a market filter on the live selection, not a stop. The `mid` rule (current band, price mid-band, 2 s move under a quarter
   band, 60 s range under 4 bands, paid EV >= 1) is the best single picker so far; the old label picker (best EV at
   the grid label >= 1.35) lost ~8% per $ at the payout and was removed on 2026-11-02 at the owner's request.
   Backtest of the selection (11-02/03): 3 h and 6 h windows chase noise; 12 h by per $ works; never rank by total.
@@ -52,7 +53,7 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
 
 ## Commands
 
-- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (62 tests). Check syntax without a pipe
+- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (63 tests). Check syntax without a pipe
   before committing (`python -c "import ast, sys; ast.parse(open(f).read())"`); a piped check hides the exit code.
 - Keep running: `powershell -File tools\supervise.ps1` (log in `logs\supervisor.log`).
 - Git: commit identity `blockchain726 <blockchain726@users.noreply.github.com>`; branch `micro-ensemble`, kept equal

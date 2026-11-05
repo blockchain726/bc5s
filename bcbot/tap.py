@@ -187,6 +187,8 @@ LIVE_RANK_WINDOW_S = 12 * 3600 # the auto ranking: return per $ over this window
 LIVE_RANK_MIN_TAPS = 30        # ... for pickers with at least this many settled taps in it ...
 LIVE_RANK_TOP = 3              # ... the best this many are followed, re-ranked every hour
 LIVE_RANK_EVERY_S = 3600
+LIVE_MAX_RANGE60 = 10.0       # no live pick while the last minute's range is this many bands or more, whichever picker
+                              # proposes it (measured 11-02: taps in a 10-20 band range lost 31%, 20+ lost 52% per $)
 MODELS = (
     {"name": "mid", "color": "#facc15", "bar": 1.0,
      "score": lambda c, x: _score_paid(c, x) if c["r"] == 0 and _mid(x) else None,
@@ -913,6 +915,9 @@ class TapAnalyzer:
             self.paper_pending.append(dict(best, created=now, price=price, model=m["name"], score=round(best_s, 4)))
         # the live pick: the highest-ranked followed picker that picked a column the live book has not taken yet
         self.rank_live_set(now)
+        if ctx.get("rng60") is None or ctx["rng60"] >= LIVE_MAX_RANGE60:
+            grid["live_skip"] = "market too wild" if ctx.get("rng60") is not None else "no range yet"
+            return
         for name in self.live_set:
             cell = next((c for c in self.paper_pending if c.get("model") == name and c["created"] == now), None)
             if cell is None or cell["t0"] in taken.get(LIVE_MODEL, ()):
