@@ -22,6 +22,10 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
 
 - Up/Down: every model is ~50% on bc.game's result except the snap-back family (`overshoot`, `prob`, `ens`), ~58-61%
   on a few hundred forward calls; the gate (3,000 forward calls, Wilson lower bound > 51.55%) is still closed.
+- Up/Down research 2026-11-09 (7,242 rounds, final payout): following a move or the order book is about break-even
+  (book + 5 s move 52.5%, busy markets 48.5% when following the move). Paper models `jump` (our 10 s move >= $10, 53.4%
+  on the last 40%) and `trees_mid` (`bcbot/ud_trees.txt`, medium activity only, 55.9% of 771 walk-forward bets) were added
+  to widen coverage beyond Overshoot; neither calls unless the owner selects it.
 - Tap: the band the price is in (r = 0, 2-4 columns ahead) hits 47-60% of the time at every band size; cells two or
   more bands away hit 2-17%. The picker rates cells by the measured hit rate of the cell kind at the current band
   size (1,000+ virtual taps) times the label, with a regime factor and a trailing-rate cap.
@@ -53,7 +57,7 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
 
 ## Commands
 
-- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (63 tests). Check syntax without a pipe
+- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (65 tests). Check syntax without a pipe
   before committing (`python -c "import ast, sys; ast.parse(open(f).read())"`); a piped check hides the exit code.
 - Keep running: `powershell -File tools\supervise.ps1` (log in `logs\supervisor.log`).
 - Git: commit identity `blockchain726 <blockchain726@users.noreply.github.com>`; branch `micro-ensemble`, kept equal

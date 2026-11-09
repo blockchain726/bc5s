@@ -283,7 +283,7 @@ document.getElementById('armladder').onchange = async e => {     // while live: 
 };
 document.querySelector('[data-reset]').onclick = resetClick;
 // ---- losing runs: how many losses in a row, how often, and what a x2 ladder pays at each length ----
-const MODEL_NAMES = {sign: 'HawkesSign', time: 'HawkesTime', mhh: 'MHH flow', mhh_hi: 'MHH confident', agree: 'Sign+MHH agree', mom: 'Momentum 5s', book: 'Strong book', bookmom: 'Book + trend', momvol: 'Momentum, volatile only', revert: 'Quiet reversal', overshoot: 'Overshoot', overshoot_book: 'Overshoot + book', prob: 'P(UP) model (logistic, fitted on the log, calls at |P-0.5| >= 0.06)', gbm: 'P(UP) trees (LightGBM)', ens: 'P(UP) ensemble (average of both)', pool: 'Pool: thin side when it pays > x2 (scored only)'};
+const MODEL_NAMES = {jump: 'Jump follow', trees_mid: 'Trees, medium', sign: 'HawkesSign', time: 'HawkesTime', mhh: 'MHH flow', mhh_hi: 'MHH confident', agree: 'Sign+MHH agree', mom: 'Momentum 5s', book: 'Strong book', bookmom: 'Book + trend', momvol: 'Momentum, volatile only', revert: 'Quiet reversal', overshoot: 'Overshoot', overshoot_book: 'Overshoot + book', prob: 'P(UP) model (logistic, fitted on the log, calls at |P-0.5| >= 0.06)', gbm: 'P(UP) trees (LightGBM)', ens: 'P(UP) ensemble (average of both)', pool: 'Pool: thin side when it pays > x2 (scored only)'};
 function every(hours, n) {
   if (!n) return '–';
   const h = hours / n;
@@ -293,7 +293,7 @@ function poolPay(stake) {     // page payout x1.94 after our stake joins a ~$102
   return 1.94 * (204 + stake) / (102 + stake) * 102 / 204;
 }
 const SHORT = {overshoot: 'Overshoot', overshoot_book: 'Oversh.+book', prob: 'P(UP)', ens: 'P(UP) ens.', gbm: 'P(UP) trees',
-  revert: 'Quiet rev.', mom: 'Momentum', book: 'Book', bookmom: 'Book+trend', momvol: 'Mom. volatile', sign: 'HawkesSign',
+  jump: 'Jump', trees_mid: 'Trees mid', revert: 'Quiet rev.', mom: 'Momentum', book: 'Book', bookmom: 'Book+trend', momvol: 'Mom. volatile', sign: 'HawkesSign',
   time: 'HawkesTime', mhh: 'MHH', mhh_hi: 'MHH conf.', agree: 'Sign+MHH', pool: 'Pool'};   // the order of the columns
 function runsBox(d) {                    // losing runs of every model, today only (since 00:00 local)
   const runs = d.runs_today || {};

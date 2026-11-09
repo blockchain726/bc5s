@@ -255,7 +255,9 @@ REVERT_MIN_MOVE = 0.5     # ... and bc.game's own price moved more than this ($)
 # price in that same direction (dev_tick) - it ran ahead of the market and tends to snap back
 OVERSHOOT_VOL_MAX, OVERSHOOT_MOVE, OVERSHOOT_DEV = 1.92, 0.5, 2.0
 OVERSHOOT_BOOK_MOVE, OVERSHOOT_BOOK_DEV, OVERSHOOT_BOOK_OBI = 0.5, 1.0, 0.5
-MODEL_REGISTERED = {"gbm": 1793543190, "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
+JUMP_MIN = 10.0                # "jump" (fixed 2026-11-09): follow our price's 10 s move when it is at least this ($)
+TREES_VOL_LO, TREES_VOL_HI, TREES_EV = 1.38, 2.77, 1.03   # "trees_mid": medium activity only, EV at the snapshot payout
+MODEL_REGISTERED = {"jump": 1794217964, "trees_mid": 1794217964, "gbm": 1793543190, "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
 
 
 def _book_call(feat: dict | None) -> str | None:
@@ -320,6 +322,79 @@ def _overshoot_call(feat: dict | None, with_book: bool = False) -> str | None:
     return "DOWN" if m > 0 else "UP"
 
 
+def _jump_call(feat: dict | None) -> str | None:
+    """The "jump" model (pre-registered 2026-11-09): bet that a big move continues.  Our price moved $10 or more over
+    the last 10 s, in any market.  First 60% of 7,242 logged rounds 53.8% of 1,140, last 40% 53.4% of 485 (+4.1% per $
+    at the final payout); larger jumps were no better ($30+: 40% of 30 on the last 40%).  None otherwise."""
+    f = feat or {}
+    m = f.get("our_mom10")
+    if f.get("error") or not isinstance(m, (int, float)) or abs(m) < JUMP_MIN:
+        return None
+    return "UP" if m > 0 else "DOWN"
+
+
+UD_SIGNED = ("dev", "dev_1s", "dev_3s", "dev_chg1", "dev_mean60", "dev_tick", "dev_z60", "tick_chg", "bc_mom05", "bc_mom1",
+             "bc_mom2", "bc_mom5", "bc_mom10", "our_mom1", "our_mom2", "our_mom5", "our_mom10", "basis_chg10", "obi1", "obi5",
+             "obi20", "obi20_chg5", "obi_w", "micro_off", "taker1", "taker3", "taker5", "taker10",
+             "ofi_binance_perp_1s", "ofi_binance_perp_3s", "ofi_bybit_perp_1s", "ofi_bybit_perp_3s",
+             "ofi_okx_perp_1s", "ofi_okx_perp_3s")
+UD_UNSIGNED = ("vol60", "dev_std60", "spread_binance", "lead_s", "tick_age")
+_ud_trees = None                                        # the model, loaded on first use; False when it can't be
+
+
+def _ud_booster():
+    global _ud_trees
+    if _ud_trees is None:
+        try:
+            import lightgbm as lgb
+            from pathlib import Path
+            here = Path(__file__).parent
+            meta = json.loads((here / "ud_trees.json").read_text(encoding="utf-8"))
+            _ud_trees = {"booster": lgb.Booster(model_file=str(here / "ud_trees.txt")), "features": meta["features"]}
+        except Exception as e:                          # noqa: BLE001 - optional model: the model just makes no calls
+            log.warning("Up/Down tree model not loaded: %r", e)
+            _ud_trees = False
+    return _ud_trees
+
+
+def _ud_vector(fe: dict, order: list, mirror: bool) -> list:
+    """The tree model's features for a snapshot (same as the research script); mirrored = UP and DOWN swapped."""
+    def num(v):
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else float("nan")
+    s = -1.0 if mirror else 1.0
+    x = {k: s * num(fe.get(k)) for k in UD_SIGNED}
+    x.update({k: num(fe.get(k)) for k in UD_UNSIGNED})
+    up, dn = num(fe.get("pool_up")), num(fe.get("pool_dn"))
+    if mirror:
+        up, dn = dn, up
+    x["pay_lean"] = (up - dn) / (up + dn) if up + dn > 0 else float("nan")
+    x["pool_total"] = up + dn
+    d, m = num(fe.get("dev_tick")), num(fe.get("bc_mom2"))
+    x["abs_dev"], x["abs_mom2"] = abs(d), abs(m)
+    x["same_way"] = 1.0 if d * m > 0 else 0.0
+    return [x[k] for k in order]
+
+
+def _treesmid_call(feat: dict | None) -> str | None:
+    """The "trees_mid" model (pre-registered 2026-11-09): the tree model of the logged rounds, used only in medium
+    activity, where it won 55.9% of 771 walk-forward bets (+10% per $; calm third 52.7%, busy third 53.0%).  The side
+    with the higher expected value at the snapshot's payouts, when that is at least TREES_EV.  None otherwise."""
+    f = feat or {}
+    v = f.get("vol60")
+    if f.get("error") or "dev" not in f or not isinstance(v, (int, float)) or not TREES_VOL_LO <= v < TREES_VOL_HI:
+        return None
+    m = _ud_booster()
+    if not m:
+        return None
+    a = np.array([_ud_vector(f, m["features"], False), _ud_vector(f, m["features"], True)], dtype=np.float64)
+    pr = m["booster"].predict(a)
+    p_up = (float(pr[0]) + 1.0 - float(pr[1])) / 2.0    # exactly symmetric between UP and DOWN
+    pay = {k: (f.get(k) if isinstance(f.get(k), (int, float)) and f.get(k) > 1 else DEFAULT_PAYOUT) for k in ("pay_up", "pay_dn")}
+    ev_up, ev_dn = p_up * pay["pay_up"], (1.0 - p_up) * pay["pay_dn"]
+    side, ev = ("UP", ev_up) if ev_up >= ev_dn else ("DOWN", ev_dn)
+    return side if ev >= TREES_EV else None
+
+
 def _sign_call(pred: dict) -> str | None:
     """HawkesSign's side from a Hawkes forecast: UP if P(up) > 0.5, DOWN if below, None without a forecast."""
     p = pred.get("sign_p_up", 0.5) if pred.get("ready", True) else 0.5
@@ -344,9 +419,10 @@ class AutoTrader:
     MODELS = {"time": "HawkesTime", "sign": "HawkesSign", "mhh": "MHH flow", "agree": "Sign + MHH agree",
               "mom": "Momentum 5s", "book": "Strong book", "bookmom": "Book + trend", "momvol": "Momentum, volatile only",
               "revert": "Quiet reversal", "overshoot": "Overshoot", "overshoot_book": "Overshoot + book",
-              "prob": "P(UP) model", "gbm": "P(UP) trees", "ens": "P(UP) ensemble"}
+              "prob": "P(UP) model", "gbm": "P(UP) trees", "ens": "P(UP) ensemble", "jump": "Jump follow",
+              "trees_mid": "Trees, medium market"}
     CALLERS = ("sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book",
-               "prob", "gbm", "ens")
+               "prob", "gbm", "ens", "jump", "trees_mid")
     STATES = ("DISARMED", "ARMED", "STOPPED")
     BREAK_EVEN = 0.5155             # 1 / 1.94: the win rate at which a flat bet breaks even (before pool dilution)
     GATE_MIN_N = 3000               # calls a model must have before its record can open the gate at all
@@ -437,7 +513,7 @@ class AutoTrader:
             self.model = "sign"
         # paper P&L if each model's stakes followed the progression (like the MHH dashboard's ladder P&L)
         self.ladders = {m: {"pnl": 0.0, "staked": 0.0, "biggest": 0.0, "step": 0}
-                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens")}
+                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid")}
 
     # ---------- runtime settings ----------
 
@@ -1656,6 +1732,9 @@ class AutoTrader:
                      "gbm": ProbModel.side(rec.get("prob_gbm")),
                      "ens": ProbModel.side(rec.get("prob_ens")),
                      "overshoot_book": _overshoot_call(rec.get("feat"), with_book=True),
+                     "jump": _jump_call(rec.get("feat")),
+                     # the tree model was fitted on the older rounds: only rounds after that count
+                     "trees_mid": _treesmid_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["trees_mid"] else None,
                      "pool": (rec.get("pool") or _pool_call(rec.get("payouts")) or {}).get("call")}
             for name, side in calls.items():
                 if side:
@@ -2047,7 +2126,7 @@ class AutoTrader:
         models_card = (
             '<div class="c"><div class="ct"><span>MODELS</span><span class="mute">right &middot; flat $1 P&amp;L</span></div>'
             + model_row("sign", "HawkesSign") + model_row("time", "HawkesTime") + model_row("mhh", "MHH flow")
-            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model") + model_row("gbm", "P(UP) trees") + model_row("ens", "P(UP) ensemble")
+            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model") + model_row("gbm", "P(UP) trees") + model_row("ens", "P(UP) ensemble") + model_row("jump", "Jump follow") + model_row("trees_mid", "Trees, medium")
             + row("our price wrong", f"{(mix_n - mix_ok) / mix_n:.1%} of {mix_n}" if mix_n else "&ndash;") + '</div>')
         return (f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; ROUND #{rid or "&ndash;"}</span>{mode}</div>'
                 f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{models_card}</div>')
@@ -2154,7 +2233,7 @@ class AutoTrader:
             "bitfinex_agrees_with_bc": round(s["bfx_agree"] / s["bfx_n"], 4) if s["bfx_n"] else None,
             "records": {name: {"called": s.get(f"{name}_called", 0), "correct": s.get(f"{name}_correct", 0),
                                "pnl": s.get(f"{name}_pnl", 0.0)}
-                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "pool")},
+                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid", "pool")},
             "prob_model": self.prob.info(),
             "stats": s, "last": self.last,
         }

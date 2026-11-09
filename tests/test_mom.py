@@ -85,3 +85,29 @@ def test_runs_today_counts_only_rounds_since_midnight(tmp_path):
     assert a.runs["overshoot"]["lengths"] == {3: 1, 1: 1} and a.runs["overshoot"]["current"] == 2
     td = a.runs_today["overshoot"]
     assert td["lengths"] == {1: 1} and td["current"] == 2 and td["bets"] == 4
+
+
+def test_jump_follows_a_big_10s_move():
+    from bcbot.auto import _jump_call
+    assert _jump_call({"our_mom10": 12.0}) == "UP"
+    assert _jump_call({"our_mom10": -18.2}) == "DOWN"
+    assert _jump_call({"our_mom10": 9.9}) is None
+    assert _jump_call({}) is None
+    assert _jump_call({"our_mom10": 15.0, "error": "x"}) is None
+
+
+def test_trees_mid_is_symmetric_and_only_in_medium_markets(monkeypatch):
+    import bcbot.auto as a
+
+    class Booster:
+        def predict(self, X):                   # P(UP) from the first signed feature (dev), mirrored rows flip it
+            return [0.5 + 0.1 * (1 if row[0] > 0 else -1) for row in X]
+    order = list(a.UD_SIGNED) + list(a.UD_UNSIGNED) + ["pay_lean", "pool_total", "abs_dev", "abs_mom2", "same_way"]
+    monkeypatch.setattr(a, "_ud_booster", lambda: {"booster": Booster(), "features": order})
+    f = {"dev": 2.0, "vol60": 2.0, "pay_up": 1.94, "pay_dn": 1.94}
+    assert a._treesmid_call(f) == "UP"                          # 0.6 x 1.94 = 1.16 >= 1.03
+    assert a._treesmid_call(dict(f, dev=-2.0)) == "DOWN"        # the mirror image
+    assert a._treesmid_call(dict(f, vol60=1.0)) is None         # calm
+    assert a._treesmid_call(dict(f, vol60=3.5)) is None         # busy
+    assert a._treesmid_call(dict(f, pay_up=1.5, pay_dn=1.5)) is None   # 0.6 x 1.5 = 0.9: no value at these payouts
+
