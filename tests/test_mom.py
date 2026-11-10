@@ -111,3 +111,28 @@ def test_trees_mid_is_symmetric_and_only_in_medium_markets(monkeypatch):
     assert a._treesmid_call(dict(f, vol60=3.5)) is None         # busy
     assert a._treesmid_call(dict(f, pay_up=1.5, pay_dn=1.5)) is None   # 0.6 x 1.5 = 0.9: no value at these payouts
 
+
+def test_overshoot_rel_scales_with_the_volatility():
+    from bcbot.auto import _overshoot_rel_call, OVERSHOOT_REL_K
+    assert OVERSHOOT_REL_K == 2.0
+    assert _overshoot_rel_call({"dev_tick": 2.5, "vol60": 1.0}) == "DOWN"     # bc.game $2.5 above the market
+    assert _overshoot_rel_call({"dev_tick": -8.0, "vol60": 3.7}) == "UP"      # a busy market needs a bigger gap
+    assert _overshoot_rel_call({"dev_tick": 5.0, "vol60": 3.7}) is None
+    assert _overshoot_rel_call({"dev_tick": 2.5}) is None and _overshoot_rel_call(None) is None
+    assert _overshoot_rel_call({"dev_tick": 2.5, "vol60": 0.0}) is None
+    assert _overshoot_rel_call({"dev_tick": 2.5, "vol60": 1.0, "error": "x"}) is None
+
+
+def test_every_caller_is_registered_scored_and_dispatched():
+    """A model that can be selected must be able to call: jump and trees_mid were selectable but had no branch in
+    _step, so choosing them made no call at all."""
+    import inspect
+    from bcbot.auto import MODEL_REGISTERED
+    step = inspect.getsource(AutoTrader._step) + inspect.getsource(AutoTrader._hawkes) + inspect.getsource(AutoTrader._mhh)
+    count = inspect.getsource(AutoTrader._count)
+    for name in AutoTrader.CALLERS:
+        assert name in AutoTrader.MODELS
+        assert f'"{name}"' in step, f"{name} can be selected but _step never calls it"
+        assert f'"{name}":' in count, f"{name} is not scored"
+    for name in ("overshoot_rel", "jump", "trees_mid"):
+        assert name in MODEL_REGISTERED

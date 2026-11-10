@@ -58,6 +58,7 @@ class Config:
     auto_min_lead_s: float       # a round whose window starts sooner / later than this is skipped as odd timing
     auto_max_lead_s: float
     auto_late_snapshot_s: float  # the second feature snapshot (paper research), this long before the cutoff
+    auto_mid_snapshot_s: float   # a snapshot between the two (paper research): what a later decision would have seen
     auto_shadow: bool            # run every real-order check on paper and log what the bot would have done
     auto_page_curve: bool        # draw our price curve on bc.game's own Up/Down chart
     auto_resume_arm: bool        # an arming that was live when the process ended goes on after a restart
@@ -123,6 +124,7 @@ def load() -> Config:
         auto_min_lead_s=float(os.getenv("AUTO_MIN_LEAD_S", "1.5")),
         auto_max_lead_s=float(os.getenv("AUTO_MAX_LEAD_S", "5")),
         auto_late_snapshot_s=float(os.getenv("AUTO_LATE_SNAPSHOT_S", "1.4")),
+        auto_mid_snapshot_s=float(os.getenv("AUTO_MID_SNAPSHOT_S", "2.2")),
         auto_shadow=_flag("AUTO_SHADOW", "1"),
         auto_page_curve=_flag("AUTO_PAGE_CURVE", "1"),
         auto_resume_arm=_flag("AUTO_RESUME_ARM", "1"),

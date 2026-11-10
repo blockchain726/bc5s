@@ -255,9 +255,10 @@ REVERT_MIN_MOVE = 0.5     # ... and bc.game's own price moved more than this ($)
 # price in that same direction (dev_tick) - it ran ahead of the market and tends to snap back
 OVERSHOOT_VOL_MAX, OVERSHOOT_MOVE, OVERSHOOT_DEV = 1.92, 0.5, 2.0
 OVERSHOOT_BOOK_MOVE, OVERSHOOT_BOOK_DEV, OVERSHOOT_BOOK_OBI = 0.5, 1.0, 0.5
+OVERSHOOT_REL_K = 2.0          # "overshoot_rel" (fixed 2026-11-10): bc.game's gap from the market is at least this x vol60
 JUMP_MIN = 10.0                # "jump" (fixed 2026-11-09): follow our price's 10 s move when it is at least this ($)
 TREES_VOL_LO, TREES_VOL_HI, TREES_EV = 1.38, 2.77, 1.03   # "trees_mid": medium activity only, EV at the snapshot payout
-MODEL_REGISTERED = {"jump": 1794217964, "trees_mid": 1794217964, "gbm": 1793543190, "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
+MODEL_REGISTERED = {"overshoot_rel": 1794322458, "jump": 1794217964, "trees_mid": 1794217964, "gbm": 1793543190, "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
 
 
 def _book_call(feat: dict | None) -> str | None:
@@ -320,6 +321,22 @@ def _overshoot_call(feat: dict | None, with_book: bool = False) -> str | None:
         if v >= OVERSHOOT_VOL_MAX or abs(m) <= OVERSHOOT_MOVE or abs(d) <= OVERSHOOT_DEV or (d > 0) != (m > 0):
             return None
     return "DOWN" if m > 0 else "UP"
+
+
+def _overshoot_rel_call(feat: dict | None) -> str | None:
+    """The "overshoot_rel" model (pre-registered 2026-11-10): the snap-back with no fixed $ thresholds.  Bet against
+    bc.game's gap from our exchange price (dev_tick) when it is at least OVERSHOOT_REL_K times the last minute's
+    volatility (vol60), in any market.  Why: Overshoot's $ thresholds (vol60 < 1.92, gap > $2) made no call in 370
+    rounds on 2026-11-09, when the median vol60 was 3.72.  On 11,534 logged rounds: first 60% 56% of 1,021, last 40%
+    58% of 732 (multipliers 1.5 / 2.5 / 3 gave 55-58% on both parts), about 2.6 times Overshoot's calls.  The
+    multiplier was looked at on the whole log, so only the forward record counts.  None otherwise."""
+    f = feat or {}
+    d, v = f.get("dev_tick"), f.get("vol60")
+    if f.get("error") or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (d, v)):
+        return None
+    if v <= 0 or d == 0 or abs(d) < OVERSHOOT_REL_K * v:
+        return None
+    return "DOWN" if d > 0 else "UP"
 
 
 def _jump_call(feat: dict | None) -> str | None:
@@ -420,9 +437,9 @@ class AutoTrader:
               "mom": "Momentum 5s", "book": "Strong book", "bookmom": "Book + trend", "momvol": "Momentum, volatile only",
               "revert": "Quiet reversal", "overshoot": "Overshoot", "overshoot_book": "Overshoot + book",
               "prob": "P(UP) model", "gbm": "P(UP) trees", "ens": "P(UP) ensemble", "jump": "Jump follow",
-              "trees_mid": "Trees, medium market"}
+              "trees_mid": "Trees, medium market", "overshoot_rel": "Overshoot, scaled"}
     CALLERS = ("sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book",
-               "prob", "gbm", "ens", "jump", "trees_mid")
+               "prob", "gbm", "ens", "jump", "trees_mid", "overshoot_rel")
     STATES = ("DISARMED", "ARMED", "STOPPED")
     BREAK_EVEN = 0.5155             # 1 / 1.94: the win rate at which a flat bet breaks even (before pool dilution)
     GATE_MIN_N = 3000               # calls a model must have before its record can open the gate at all
@@ -513,7 +530,7 @@ class AutoTrader:
             self.model = "sign"
         # paper P&L if each model's stakes followed the progression (like the MHH dashboard's ladder P&L)
         self.ladders = {m: {"pnl": 0.0, "staked": 0.0, "biggest": 0.0, "step": 0}
-                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid")}
+                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid", "overshoot_rel")}
 
     # ---------- runtime settings ----------
 
@@ -1032,9 +1049,20 @@ class AutoTrader:
                 asyncio.ensure_future(self._call(rid, rec, _revert_call(rec["feat"])))
             elif self.model in ("overshoot", "overshoot_book"):      # bc.game ran ahead of the market: snap-back
                 asyncio.ensure_future(self._call(rid, rec, _overshoot_call(rec["feat"], self.model == "overshoot_book")))
+            elif self.model == "overshoot_rel":                      # the snap-back, scaled by the volatility
+                asyncio.ensure_future(self._call(rid, rec, _overshoot_rel_call(rec["feat"])))
+            elif self.model == "jump":                               # a big 10 s move continues
+                asyncio.ensure_future(self._call(rid, rec, _jump_call(rec["feat"])))
+            elif self.model == "trees_mid":                          # the tree model, medium activity only
+                asyncio.ensure_future(self._call(rid, rec, _treesmid_call(rec["feat"])))
         if "mhh_done" not in rec and now >= cutoff - self.flow_model.lead_ms / 1000:   # MHH's own lead (2 s)
             rec["mhh_done"] = True
             asyncio.ensure_future(self._mhh(rid, rec))
+        if "feat_mid" not in rec and now >= cutoff - self.cfg.auto_mid_snapshot_s:
+            try:                                  # snapshot M (paper research): the same short list as snapshot B,
+                rec["feat_mid"] = self._features(now, rec, late=True)   # at a lead a real order could still make
+            except Exception as e:
+                rec["feat_mid"] = {"error": repr(e)[:120]}
         if "feat_late" not in rec and now >= cutoff - self.cfg.auto_late_snapshot_s:
             try:                                  # snapshot B: the late, tick-aligned deviation (paper research)
                 rec["feat_late"] = self._features(now, rec, late=True)
@@ -1733,6 +1761,7 @@ class AutoTrader:
                      "ens": ProbModel.side(rec.get("prob_ens")),
                      "overshoot_book": _overshoot_call(rec.get("feat"), with_book=True),
                      "jump": _jump_call(rec.get("feat")),
+                     "overshoot_rel": _overshoot_rel_call(rec.get("feat")),
                      # the tree model was fitted on the older rounds: only rounds after that count
                      "trees_mid": _treesmid_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["trees_mid"] else None,
                      "pool": (rec.get("pool") or _pool_call(rec.get("payouts")) or {}).get("call")}
@@ -2126,7 +2155,7 @@ class AutoTrader:
         models_card = (
             '<div class="c"><div class="ct"><span>MODELS</span><span class="mute">right &middot; flat $1 P&amp;L</span></div>'
             + model_row("sign", "HawkesSign") + model_row("time", "HawkesTime") + model_row("mhh", "MHH flow")
-            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model") + model_row("gbm", "P(UP) trees") + model_row("ens", "P(UP) ensemble") + model_row("jump", "Jump follow") + model_row("trees_mid", "Trees, medium")
+            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model") + model_row("gbm", "P(UP) trees") + model_row("ens", "P(UP) ensemble") + model_row("jump", "Jump follow") + model_row("trees_mid", "Trees, medium") + model_row("overshoot_rel", "Overshoot, scaled")
             + row("our price wrong", f"{(mix_n - mix_ok) / mix_n:.1%} of {mix_n}" if mix_n else "&ndash;") + '</div>')
         return (f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; ROUND #{rid or "&ndash;"}</span>{mode}</div>'
                 f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{models_card}</div>')
@@ -2233,7 +2262,7 @@ class AutoTrader:
             "bitfinex_agrees_with_bc": round(s["bfx_agree"] / s["bfx_n"], 4) if s["bfx_n"] else None,
             "records": {name: {"called": s.get(f"{name}_called", 0), "correct": s.get(f"{name}_correct", 0),
                                "pnl": s.get(f"{name}_pnl", 0.0)}
-                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid", "pool")},
+                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid", "overshoot_rel", "pool")},
             "prob_model": self.prob.info(),
             "stats": s, "last": self.last,
         }
