@@ -64,7 +64,27 @@ def test_each_picker_places_its_own_tap(tmp_path):
                              "best-lo": (4, 0)}
     assert sorted(c["model"] for c in a.paper_pending) == sorted(grid["picks"])
     a._pick_models(grid, 600.0, 102.0)                                   # the same columns again: nothing new
-    assert len(a.paper_pending) == len(MODELS) - 6                       # mid, mid-lo, lr, lr-calm, gbm, gbm-safe
+    assert len(a.paper_pending) == len(MODELS) - 10      # mid, mid-lo, lr, lr-calm, lr-hi, gbm, gbm-safe, gbm-r0,
+                                                         # and the consensus pickers (no cell has the votes)
+
+
+def test_consensus_pickers_tap_the_cell_the_named_pickers_agree_on(tmp_path):
+    a = _analyzer(tmp_path)
+    cells = _cells()
+    a.paper_pending = [dict(cells[1], created=100.0, price=102.0, model="gbm")]     # an earlier snapshot's tap
+    grid = {"cells": cells, "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, 500.0, 102.0)
+    assert "both" not in grid["picks"] and "vote4" not in grid["picks"]             # gbm alone; gbm + paid-lo = 2
+    a = _analyzer(tmp_path)
+    a.paper_pending = [dict(cells[1], created=100.0, price=102.0, model=m) for m in ("gbm", "lr", "mid-lo")]
+    grid = {"cells": cells, "pick": None, "picks": {}, "ev_bar": 1.35}
+    a._pick_models(grid, 500.0, 102.0)                                   # paid-lo picks the same cell now: 4 votes
+    assert grid["picks"]["both"] == (4, 0) and grid["picks"]["vote4"] == (4, 0)
+    new = {c["model"]: c for c in a.paper_pending if c["created"] == 500.0}
+    assert new["both"]["score"] == 2.0 and new["vote4"]["score"] == 4.0 and new["vote4"]["odds"] == 3.8
+    n = len(a.paper_pending)
+    a._pick_models(grid, 600.0, 102.0)                                   # one tap per column for them too
+    assert len(a.paper_pending) == n
 
 
 def test_mid_band_pickers_need_a_quiet_mid_band_price(tmp_path):

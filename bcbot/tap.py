@@ -243,6 +243,22 @@ MODELS = (
     {"name": "mid-lo", "color": "#94a3b8", "bar": None,
      "score": lambda c, x: _score_label(c, x) if c["r"] == 0 and _mid(x) else None,
      "desc": "the live picker with the same mid-band gate"},
+    # added 2026-11-10 from the pickers' own books (taps after the gbm fit, 11-04 23:12 UTC; paper only, to be judged
+    # on their forward books): gbm's adjacent-band taps lost 18-20% per $ (210 taps) against +11% in the current
+    # band; lr lost 14% per $ under a score of 1.1 and 3% at 1.1-1.3, and made +15% at 1.3-1.5 (1,045 taps)
+    {"name": "gbm-r0", "color": "#84cc16", "bar": 1.3,
+     "score": lambda c, x: _score_gbm(c, x) if c["r"] == 0 else None,
+     "desc": "the LightGBM model, current band only: P x label x payout >= 1.3"},
+    {"name": "lr-hi", "color": "#f43f5e", "bar": 1.3, "score": _score_lr,
+     "desc": "the fitted model at a higher bar: P x label x payout >= 1.3"},
+    # consensus pickers: no score of their own, they tap a cell once enough of the named pickers have an open tap on
+    # it.  Cells gbm AND lr both picked made +14% per $ (1,736) where gbm alone lost 11% and lr alone 7%; cells 4 or 5
+    # of these five picked made +29% (715) where cells only one picked lost 19% (5,522)
+    {"name": "both", "color": "#eab308", "bar": 2.0, "score": None, "vote": ("gbm", "lr"), "need": 2,
+     "desc": "consensus: the cell both fitted models (gbm and lr) have picked"},
+    {"name": "vote4", "color": "#a78bfa", "bar": 4.0, "score": None,
+     "vote": ("gbm", "lr", "mid-lo", "paid-lo", "label-r0"), "need": 4,
+     "desc": "consensus: a cell at least 4 of gbm, lr, mid-lo, paid-lo, label-r0 have picked"},
 )
 STATS_VERSION = 3             # bumping it resets the EV and paper tables (they depend on how EV is computed)
 MIN_AHEAD_MS = 4300           # players never tap a window starting < 4.04 s ahead (0 of 133): ours need 4.3 s
@@ -901,6 +917,8 @@ class TapAnalyzer:
         for c in self.paper_pending:
             taken.setdefault(c.get("model", LIVE_MODEL), set()).add(c["t0"])
         for m in MODELS:
+            if m.get("vote"):                             # a consensus picker: after the others have picked
+                continue
             best, best_s = None, None
             for c in grid["cells"]:
                 if not c["tappable"] or c["ev_emp"] is None:
@@ -913,6 +931,28 @@ class TapAnalyzer:
                 continue
             grid["picks"][m["name"]] = (best["k"], best["r"])
             self.paper_pending.append(dict(best, created=now, price=price, model=m["name"], score=round(best_s, 4)))
+        # the consensus pickers: the cell that enough of their named pickers have an open tap on (placed now or at an
+        # earlier snapshot), tapped at the label on the grid now; the most voted cell, then the best paid EV
+        for m in MODELS:
+            if not m.get("vote"):
+                continue
+            votes: dict = {}
+            for c in self.paper_pending:
+                if c.get("model") in m["vote"]:
+                    votes.setdefault((c["t0"], c["lo"]), set()).add(c["model"])
+            best, best_s = None, None
+            for c in grid["cells"]:
+                n = len(votes.get((c["t0"], c["lo"]), ()))
+                if (n < m["need"] or not c["tappable"] or c["ev_emp"] is None or c["odds_src"] != "bc"
+                        or c["t0"] in taken.get(m["name"], ())):
+                    continue
+                s = (n, _score_paid(c, ctx))
+                if best_s is None or s > best_s:
+                    best, best_s = c, s
+            if best is None:
+                continue
+            grid["picks"][m["name"]] = (best["k"], best["r"])
+            self.paper_pending.append(dict(best, created=now, price=price, model=m["name"], score=float(best_s[0])))
         # the live pick: the highest-ranked followed picker that picked a column the live book has not taken yet
         self.rank_live_set(now)
         if ctx.get("rng60") is None or ctx["rng60"] >= LIVE_MAX_RANGE60:
