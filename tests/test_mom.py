@@ -161,3 +161,42 @@ def test_pnl_reset_counts_from_now_and_keeps_the_forward_records(tmp_path):
     b = AutoTrader(FakeTrader(), cfg)                                                # a restart: the old round stays out
     b._load_log()
     assert b.stats_since == a.stats_since and b.stats["rounds"] == 0 and b.stats["mom_fwd_called"] == 1
+
+
+def test_hawkes_forecast_stops_at_its_time_budget():
+    """A busy order book made a forecast take 3-4.7 s and starve the round loop; it now stops simulating in time."""
+    import time
+    from collections import deque
+    import numpy as np
+    import bcbot.predictor as P
+
+    class Feed:
+        ev_time = deque([(0.0, 0.0)]); ev_sign = deque([(0.0, 0.0)]); bi = deque([(0.0, 0.2)])
+        def now(self):
+            return 1.0
+
+    class SlowMHP:
+        def excitation(self, t, typ, now):
+            return None
+        def simulate(self, E, horizon, rng):
+            time.sleep(0.004)
+            return [(1.0, P.EC), (2.0, P.EC_UP)]
+
+    class Coe:
+        def forecast(self, bt, bv, now, offsets):
+            return np.full(len(offsets), 1e-6)
+
+    p = P.HawkesPredictor(Feed())
+    p.mhp_time = p.mhp_sign = SlowMHP()
+    p.coe = Coe()
+    old = P.PREDICT_BUDGET_S
+    P.PREDICT_BUDGET_S = 0.3
+    try:
+        t0 = time.perf_counter()
+        out = p.predict(1.0, 6.0)
+        took = time.perf_counter() - t0
+    finally:
+        P.PREDICT_BUDGET_S = old
+    assert out["ready"] and took < 1.0                             # 400 simulations would take 1.6 s or more
+    assert all(P.MIN_SIMS <= n < P.N_SIMS for n in out["sims"])
+    assert 0.0 <= out["sign_p_up"] <= 1.0 and out["time_call"] == "UP"

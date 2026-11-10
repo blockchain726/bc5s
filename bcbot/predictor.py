@@ -28,6 +28,12 @@ COE_TRAIN_S = 1800
 COE_MIN_S = 300
 COE_REFIT_S = 300
 N_SIMS = 200
+# The simulations are pure-Python loops that hold the interpreter, and their cost grows with the order book's
+# activity: on 2026-11-10 (three times the usual mid-price changes) a forecast took 3-4.7 s instead of ~0.7 s, ended
+# after the cutoff and starved the round loop, so half the rounds lost their late snapshots and the MHH call.  Each
+# of the two models therefore stops simulating once its share of this time is used (never under MIN_SIMS).
+PREDICT_BUDGET_S = 0.8
+MIN_SIMS = 30
 
 
 def _arr(q) -> tuple[np.ndarray, np.ndarray]:
@@ -102,7 +108,10 @@ class HawkesPredictor:
         offsets = np.arange(0.0, b + 2 * GRID, GRID)
         rhat = self.coe.forecast(bt, bv, now, offsets)
         sums, counts, first = [], [], []
-        for _ in range(N_SIMS):
+        stop = t_calc + PREDICT_BUDGET_S / 2
+        for n in range(N_SIMS):
+            if n >= MIN_SIMS and time.perf_counter() > stop:
+                break
             ev = [s for s, j in self.mhp_time.simulate(E, b, self.rng) if j == EC]
             first.append(ev[0] if ev else np.nan)
             in_win = [s for s in ev if s >= a]
@@ -116,7 +125,12 @@ class HawkesPredictor:
         ts, tys = _arr(feed.ev_sign)
         Es = self.mhp_sign.excitation(ts, tys, now)
         ups = net_next = 0.0
-        for _ in range(N_SIMS):
+        n_sign = 0
+        stop = time.perf_counter() + PREDICT_BUDGET_S / 2
+        for n in range(N_SIMS):
+            if n >= MIN_SIMS and time.perf_counter() > stop:
+                break
+            n_sign += 1
             ev = self.mhp_sign.simulate(Es, b, self.rng)
             moves = [(s, j) for s, j in ev if j in (EC_UP, EC_DN)]
             if moves:
@@ -130,8 +144,9 @@ class HawkesPredictor:
             "time_call": "UP" if exp_ret > 0 else "DOWN" if exp_ret < 0 else None,
             "n_changes": float(np.mean(counts)),        # expected mid-price changes in the window
             "t_next": t_next, "r_next": r_next,         # the paper's next-change forecast
-            "sign_p_up": ups / N_SIMS,                  # HawkesSign P(UP over the window)
-            "sign_p_next_up": net_next / N_SIMS,
+            "sign_p_up": ups / n_sign,                  # HawkesSign P(UP over the window)
+            "sign_p_next_up": net_next / n_sign,
+            "sims": [len(sums), n_sign],                # simulations done (N_SIMS unless the time budget ran out)
             "bi": float(bv[-1]) if len(bv) else 0.0,
             "lead_s": round(lead, 3),                   # window start minus the decision time (bc.game's clock)
             "calc_ms": round((time.perf_counter() - t_calc) * 1000),
