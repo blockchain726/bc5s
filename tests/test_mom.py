@@ -129,10 +129,35 @@ def test_every_caller_is_registered_scored_and_dispatched():
     import inspect
     from bcbot.auto import MODEL_REGISTERED
     step = inspect.getsource(AutoTrader._step) + inspect.getsource(AutoTrader._hawkes) + inspect.getsource(AutoTrader._mhh)
-    count = inspect.getsource(AutoTrader._count)
+    count = inspect.getsource(AutoTrader._model_calls)
     for name in AutoTrader.CALLERS:
         assert name in AutoTrader.MODELS
         assert f'"{name}"' in step, f"{name} can be selected but _step never calls it"
         assert f'"{name}":' in count, f"{name} is not scored"
     for name in ("overshoot_rel", "jump", "trees_mid"):
         assert name in MODEL_REGISTERED
+
+
+def test_pnl_reset_counts_from_now_and_keeps_the_forward_records(tmp_path):
+    """'P&L -> 0': the shown record starts again and stays so after a restart; the round log, the gate's forward
+    records and the real-loss counters are not touched."""
+    import json, time
+    from tests.test_safety import make_cfg, FakeTrader
+    cfg = make_cfg(tmp_path)
+    now = time.time()
+    old = {"id": 1, "cutoff": now - 600, "win": "UP", "tie": False, "call": "UP", "result": "WIN", "payout": 1.94,
+           "feat": {"our_mom5": 1.0}}
+    cfg.auto_log.write_text(json.dumps(old) + chr(10), encoding="utf-8")
+    a = AutoTrader(FakeTrader(), cfg)
+    a._load_log()
+    assert a.stats["rounds"] == 1 and a.stats["called"] == 1 and a.stats["pnl"] > 0 and a.stats["mom_called"] == 1
+    run, campaign = a.real_run, a.campaign_pnl
+    a.reset_stats(who="test")
+    assert a.stats["rounds"] == 0 and a.stats["called"] == 0 and a.stats["pnl"] == 0.0 and "mom_called" not in a.stats
+    assert a.stats["mom_fwd_called"] == 1 and a.runs == {} and not a.settled
+    assert (a.real_run, a.campaign_pnl) == (run, campaign)
+    a._count(dict(old, id=2, cutoff=time.time() + 1, win="DOWN", result="LOSS", pnl=-1.0))       # a round after the reset
+    assert a.stats["rounds"] == 1 and a.stats["mom_called"] == 1 and a.stats["mom_fwd_called"] == 2
+    b = AutoTrader(FakeTrader(), cfg)                                                # a restart: the old round stays out
+    b._load_log()
+    assert b.stats_since == a.stats_since and b.stats["rounds"] == 0 and b.stats["mom_fwd_called"] == 1

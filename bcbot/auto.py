@@ -467,9 +467,8 @@ class AutoTrader:
         self.round: dict = {}
         self.recs: dict[int, dict] = {}
         self.history: deque = deque(maxlen=200)          # past expected returns, to scale the confidence z
-        self.stats = {"rounds": 0, "called": 0, "correct": 0, "ties": 0, "skipped": 0, "pnl": 0.0,
-                      "sign_called": 0, "sign_correct": 0, "bfx_n": 0, "bfx_agree": 0,
-                      "live_orders": 0, "live_failed": 0, "live_won": 0, "live_pnl": 0.0}
+        self.stats = self._new_stats()
+        self.stats_since = 0.0                           # 'P&L -> 0': the shown record counts rounds from this time
         self.last: dict = {}
         self.recent: deque = deque(maxlen=30)            # "W" / "L" / "T" of the last called rounds, for the panel
         self.settled: deque = deque(maxlen=6)            # the last settled calls (records), for the panel's result list
@@ -523,6 +522,7 @@ class AutoTrader:
             self.model = saved.get("model", self.model)
             self.progression = float(saved.get("progression", self.progression))
             self.since = float(saved.get("since", 0.0))
+            self.stats_since = float(saved.get("stats_since", 0.0))
         except (OSError, ValueError):
             pass
         if self.model not in self.CALLERS:
@@ -546,7 +546,34 @@ class AutoTrader:
     def _save_settings(self) -> None:
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
         self._settings_path.write_text(json.dumps({"model": self.model, "progression": self.progression,
-                                                   "since": self.since}), encoding="utf-8")
+                                                   "since": self.since, "stats_since": self.stats_since}),
+                                       encoding="utf-8")
+
+    @staticmethod
+    def _new_stats() -> dict:
+        return {"rounds": 0, "called": 0, "correct": 0, "ties": 0, "skipped": 0, "pnl": 0.0,
+                "sign_called": 0, "sign_correct": 0, "bfx_n": 0, "bfx_agree": 0,
+                "live_orders": 0, "live_failed": 0, "live_won": 0, "live_pnl": 0.0}
+
+    def reset_stats(self, who: str = "operator") -> str:
+        """'P&L -> 0': the shown record (accuracy and P&L of the calls and of every model, the losing runs, the paper
+        ladders, the real-order totals on the panel) starts again from now, and stays so across restarts
+        (stats_since in auto_settings.json).  The round log is not touched.  NOT reset, because they are evidence or
+        safety and not a display: each model's forward record (the go-live gate), the run of real losses, today's
+        real P&L and attempts, the campaign P&L."""
+        fwd = {k: v for k, v in self.stats.items() if "_fwd_" in k}
+        self.stats = {**self._new_stats(), **fwd}
+        self.stats_since = time.time()
+        self.runs, self.runs_today = {}, {}
+        self.recent.clear()
+        self.settled.clear()
+        self.call_streak = 0
+        self._restart_test()                       # the paper ladders too (sets `since`)
+        self._save_settings()
+        self._event("stats_reset", who=who)
+        log.warning("Shown record reset by %s: accuracy and P&L count from now (the log and the gate's forward "
+                    "records are kept)", who)
+        return "accuracy and P&L count from now"
 
     def _restart_test(self) -> None:
         """A new model / progression starts a fresh ladder test from now."""
@@ -1719,8 +1746,15 @@ class AutoTrader:
         s = self.stats
         if replay and rec.get("result"):
             rec["pnl"] = self._pnl(rec, rec.get("call"))
-        s["rounds"] += 1
         win, result = rec.get("win"), rec.get("result")
+        if self._rec_time(rec) < self.stats_since:  # before 'P&L -> 0': only the gate's forward records count it
+            if win and not rec.get("tie"):
+                for name, side in self._model_calls(rec).items():
+                    if side and self._rec_time(rec) >= MODEL_REGISTERED.get(name, 0):
+                        s[f"{name}_fwd_called"] = s.get(f"{name}_fwd_called", 0) + 1
+                        s[f"{name}_fwd_correct"] = s.get(f"{name}_fwd_correct", 0) + int(side == win)
+            return
+        s["rounds"] += 1
         if win:
             self.winners.append("T" if rec.get("tie") else win[0])
         if rec.get("bfx_ret") is not None:
@@ -1743,29 +1777,7 @@ class AutoTrader:
             s["live_orders"] += int(bool(lv.get("ok")))
             s["live_failed"] += int(bool(lv.get("error")))
         if win and not rec.get("tie"):              # each model's own record, whichever one makes the calls
-            pred, m = rec.get("pred") or {}, rec.get("mhh") or {}
-            sign = _sign_call(pred)
-            calls = {"time": pred.get("time_call"),
-                     "sign": sign,
-                     "mhh": m.get("call"),
-                     "mhh_hi": m.get("call") if m.get("conf", 0) >= self.flow_model.q75 else None,
-                     "agree": sign if sign and sign == m.get("call") else None,
-                     "mom": _mom_call(rec.get("feat")),
-                     "book": _book_call(rec.get("feat")),
-                     "bookmom": _bookmom_call(rec.get("feat")),
-                     "momvol": _momvol_call(rec.get("feat")),
-                     "revert": _revert_call(rec.get("feat")),
-                     "overshoot": _overshoot_call(rec.get("feat")),
-                     "prob": ProbModel.side(rec.get("prob")),
-                     "gbm": ProbModel.side(rec.get("prob_gbm")),
-                     "ens": ProbModel.side(rec.get("prob_ens")),
-                     "overshoot_book": _overshoot_call(rec.get("feat"), with_book=True),
-                     "jump": _jump_call(rec.get("feat")),
-                     "overshoot_rel": _overshoot_rel_call(rec.get("feat")),
-                     # the tree model was fitted on the older rounds: only rounds after that count
-                     "trees_mid": _treesmid_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["trees_mid"] else None,
-                     "pool": (rec.get("pool") or _pool_call(rec.get("payouts")) or {}).get("call")}
-            for name, side in calls.items():
+            for name, side in self._model_calls(rec).items():
                 if side:
                     s[f"{name}_called"] = s.get(f"{name}_called", 0) + 1
                     s[f"{name}_correct"] = s.get(f"{name}_correct", 0) + int(side == win)
@@ -1790,6 +1802,32 @@ class AutoTrader:
         if lv.get("ok"):
             s["live_won"] += int(result == "WIN")
             s["live_pnl"] = round(s["live_pnl"] + rec.get("live_pnl", rec["pnl"]), 4)
+
+    def _model_calls(self, rec: dict) -> dict:
+        """What every model called in a settled round (None = no call), from the record."""
+        pred, m = rec.get("pred") or {}, rec.get("mhh") or {}
+        sign = _sign_call(pred)
+        calls = {"time": pred.get("time_call"),
+                 "sign": sign,
+                 "mhh": m.get("call"),
+                 "mhh_hi": m.get("call") if m.get("conf", 0) >= self.flow_model.q75 else None,
+                 "agree": sign if sign and sign == m.get("call") else None,
+                 "mom": _mom_call(rec.get("feat")),
+                 "book": _book_call(rec.get("feat")),
+                 "bookmom": _bookmom_call(rec.get("feat")),
+                 "momvol": _momvol_call(rec.get("feat")),
+                 "revert": _revert_call(rec.get("feat")),
+                 "overshoot": _overshoot_call(rec.get("feat")),
+                 "prob": ProbModel.side(rec.get("prob")),
+                 "gbm": ProbModel.side(rec.get("prob_gbm")),
+                 "ens": ProbModel.side(rec.get("prob_ens")),
+                 "overshoot_book": _overshoot_call(rec.get("feat"), with_book=True),
+                 "jump": _jump_call(rec.get("feat")),
+                 "overshoot_rel": _overshoot_rel_call(rec.get("feat")),
+                 # the tree model was fitted on the older rounds: only rounds after that count
+                 "trees_mid": _treesmid_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["trees_mid"] else None,
+                 "pool": (rec.get("pool") or _pool_call(rec.get("payouts")) or {}).get("call")}
+        return calls
 
     def _load_log(self) -> None:
         """Rebuild the record from logs/auto_rounds.jsonl, so a restart keeps accuracy, P&L and - above all - the

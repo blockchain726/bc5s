@@ -104,6 +104,8 @@ def build_app(trader: Trader, auto: AutoTrader, cfg: Config, tap=None) -> web.Ap
                 auto.reset_run(int(body.get("ack_run", -1)), str(body.get("reason", "")), who="api")
             if "ladder" in body and not body.get("arm"):             # switch the ladder while armed
                 auto.set_ladder(bool(body["ladder"]), who="api")
+            if body.get("stats_reset"):                                           # 'P&L -> 0': the shown record
+                auto.reset_stats(who="api")
             if body.get("tap_models_reset"):                                      # the trial pickers' paper books
                 if tap is None:
                     raise TradeError("the Tap analyzer is not running (start without --no-tap)")
@@ -188,6 +190,7 @@ button.liveb.on{background:#b4232f;border-color:#b4232f}#msg{color:#f0b429;min-h
     <label title="stake x1 after a win, x2 after a loss (AUTO_REAL_LADDER), for this arming although the gate is closed"><input type="checkbox" id="armladder"> compensate ladder</label>
     <button data-live="0" title="disarm: back to paper">paper / disarm</button>
     <button data-reset="1" title="set the run of real losses back to 0 (your decision; written to the events log)">losses &rarr; 0</button>
+    <button id="statsreset" title="accuracy and P&amp;L of the calls and of every model count from now (the round log, the gate's forward records and the real-loss counters are kept)">P&amp;L &rarr; 0</button>
     <input type="password" id="tok" placeholder="API token (from .env)" title="the API_TOKEN from .env; kept in this browser only" style="font:inherit;color:#d6dde6;background:#1b2029;border:1px solid #2c3440;border-radius:6px;padding:5px 8px;width:150px"></div>
   <div class="grp"><a href="/tap" style="color:#5aa9ff;text-decoration:none;border:1px solid #2c3440;border-radius:6px;padding:5px 10px">Tap analyzer &rarr;</a></div>
 </div>
@@ -282,6 +285,11 @@ document.getElementById('armladder').onchange = async e => {     // while live: 
                         : 'ladder not changed: ' + res.err);
 };
 document.querySelector('[data-reset]').onclick = resetClick;
+document.getElementById('statsreset').onclick = async () => {
+  if (!confirm('Count accuracy and P&L from now? The round log, the forward records of the gate and the real-loss counters are kept.')) return;
+  const res = await post({stats_reset: true});
+  if (!res.ok) alert('NOT reset: ' + res.err);
+};
 // ---- losing runs: how many losses in a row, how often, and what a x2 ladder pays at each length ----
 const MODEL_NAMES = {overshoot_rel: 'Overshoot, scaled by volatility', jump: 'Jump follow', trees_mid: 'Trees, medium', sign: 'HawkesSign', time: 'HawkesTime', mhh: 'MHH flow', mhh_hi: 'MHH confident', agree: 'Sign+MHH agree', mom: 'Momentum 5s', book: 'Strong book', bookmom: 'Book + trend', momvol: 'Momentum, volatile only', revert: 'Quiet reversal', overshoot: 'Overshoot', overshoot_book: 'Overshoot + book', prob: 'P(UP) model (logistic, fitted on the log, calls at |P-0.5| >= 0.06)', gbm: 'P(UP) trees (LightGBM)', ens: 'P(UP) ensemble (average of both)', pool: 'Pool: thin side when it pays > x2 (scored only)'};
 function every(hours, n) {
