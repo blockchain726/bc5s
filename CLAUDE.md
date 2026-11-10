@@ -26,6 +26,13 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   (book + 5 s move 52.5%, busy markets 48.5% when following the move). Paper models `jump` (our 10 s move >= $10, 53.4%
   on the last 40%) and `trees_mid` (`bcbot/ud_trees.txt`, medium activity only, 55.9% of 771 walk-forward bets) were added
   to widen coverage beyond Overshoot; neither calls unless the owner selects it.
+- Up/Down 2026-11-10 (11,534 rounds): Overshoot's fixed $ thresholds made no call in 370 rounds on 11-09 (median
+  vol60 3.72). Paper model `overshoot_rel` (bet against `dev_tick` when it is >= 2 x vol60, any market: 56% of 1,021
+  then 58% of 732, 2.6 times Overshoot's calls) was added, and `jump` / `trees_mid` now really call when selected.
+  The same bet read at the late snapshot (1.35 s) is as good or better than at 2.9 s; the latest real order that
+  got through was sent 1.56 s before the cutoff (round trip 0.92 s median), so a third paper snapshot `feat_mid`
+  (`AUTO_MID_SNAPSHOT_S`, 2.2 s) is logged to measure a later decision. The `prob` model is overconfident forward
+  (says 59%, gets 56%); its inputs are raw $ and not yet scaled by vol60.
 - Tap: the band the price is in (r = 0, 2-4 columns ahead) hits 47-60% of the time at every band size; cells two or
   more bands away hit 2-17%. The picker rates cells by the measured hit rate of the cell kind at the current band
   size (1,000+ virtual taps) times the label, with a regime factor and a trailing-rate cap.
@@ -52,12 +59,17 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   pickers use it. Walk-forward 11-02..11-04: gbm-safe +44% per $ on 3,788 taps, 9 of 9 four-hour blocks positive;
   the strongest features are the distance to the cell's edge, the move toward the cell, the 60 s range and the
   real/configured volatility. Time of day adds nothing out of sample.
+- Tap 2026-11-10 (156,799 paper taps): the +25-35% per $ books are mostly one day (11-03); after 11-04 23:12 UTC
+  `gbm-safe` made +17% per $ (1,245 taps), the live paper book +6% (3,525), and every picker lost on 11-09. Cells
+  several pickers choose do far better than cells one chooses (4 of 5: +29% per $; one: -19%), `lr` loses under a
+  score of 1.3 and `gbm` loses in the adjacent bands: paper pickers `both`, `vote4`, `lr-hi`, `gbm-r0` test that.
+  Not done: the hit-rate table never forgets (all-time counts), and `gbm` / `lr` are still fitted on 11-02..11-04.
 - Candidate pickers (`MODELS`) run side by side on paper, each with its own book, colour and box on the page.
   Their books are in `tap_stats.json` ("models") and `logs/tap_models.jsonl`; the page features `TAP_SHOW_MODEL`.
 
 ## Commands
 
-- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (65 tests). Check syntax without a pipe
+- Tests: `.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider` (68 tests). Check syntax without a pipe
   before committing (`python -c "import ast, sys; ast.parse(open(f).read())"`); a piped check hides the exit code.
 - Keep running: `powershell -File tools\supervise.ps1` (log in `logs\supervisor.log`).
 - Git: commit identity `blockchain726 <blockchain726@users.noreply.github.com>`; branch `micro-ensemble`, kept equal
