@@ -1053,9 +1053,16 @@ class TapAnalyzer:
         return out
 
     def reset_models(self) -> None:
+        """'reset books': every picker's paper book and the live picks' paper book start again from now.  Kept: the
+        logs, the cell hit rates the pickers price from, the 12 h history the auto ranking uses, the real book."""
         self.stats["models"] = {}
         self.model_hour = {}
-        log.info("Tap candidate pickers: books reset")
+        self.model_recent = {}
+        self.stats["paper"] = {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
+        self.stats["paper_strict"] = {"bets": 0, "wins": 0, "pnl": 0.0}
+        self.paper_recent.clear()
+        self._save()
+        log.info("Tap paper books reset: the pickers' books and the live picks' book count from now")
 
     @staticmethod
     def _grid(now, price, gap, step, vol_cfg, vol_real, max_odds, bc_odds=None, calib=None, hits=None) -> dict:

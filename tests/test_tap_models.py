@@ -261,3 +261,18 @@ def test_no_live_pick_in_a_wild_minute(tmp_path):
     assert grid["pick"] is None and grid["live_skip"] == "market too wild"
     assert not any(c["model"] == "live" for c in a.paper_pending)
 
+
+def test_reset_books_zeroes_the_paper_books_and_keeps_what_the_pickers_use(tmp_path):
+    a = _analyzer(tmp_path)
+    a.stats_path = tmp_path / "tap_stats.json"
+    a.stats["models"] = {"mid": {"bets": 5, "wins": 3, "pnl": 2.5, "pnl_label": 6.0, "since": 1.0}}
+    a.stats["paper"] = {"bets": 9, "wins": 4, "pnl": -1.2, "pnl_label": 3.0}
+    a.stats["paper_strict"] = {"bets": 2, "wins": 1, "pnl": 0.4}
+    a.stats["cells"] = {"3,0": {"n": 2000, "hit": 1000}}
+    a.model_hist = {"mid": deque([(1.0, 1.5)])}
+    a.paper_recent.append({"hit": True})
+    a.reset_models()
+    assert a.stats["models"] == {} and a.stats["paper"] == {"bets": 0, "wins": 0, "pnl": 0.0, "pnl_label": 0.0}
+    assert a.stats["paper_strict"]["bets"] == 0 and not a.paper_recent
+    assert a.stats["cells"]["3,0"]["n"] == 2000 and len(a.model_hist["mid"]) == 1     # the hit rates and the ranking stay
+    assert json.loads(a.stats_path.read_text(encoding="utf-8"))["paper"]["bets"] == 0
