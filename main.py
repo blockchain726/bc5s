@@ -7,6 +7,7 @@
 """
 import argparse
 import asyncio
+from contextlib import suppress
 import os
 import logging
 import threading
@@ -38,15 +39,11 @@ HELP = """Commands (amount is in the account's trading currency, shown by 'statu
   live off        disarm (also: create the file logs/KILL)
   live clear <reason> [won|lost|none]   clear a technical stop after you checked the site
   live reset run=<n> <reason>   set the run of real losses back to 0 (your decision; logged, kept across restarts)
-  model <name>    which model makes the calls: sign|mhh|agree|mom|book|bookmom|momvol|revert|overshoot|
-                  overshoot_book|overshoot_rel|jump|trees_mid|prob|gbm|ens (P(UP) fitted on the logged rounds: logistic, LightGBM trees,
-                  or their average; each calls only when it is
-                  at least 56% one way).  Older text: (HawkesSign, MHH flow, agree: only
-                         when HawkesSign and MHH call the same side, mom: the direction of our price over
-                         the last 5 s, book: with Binance's 20-level book when |imbalance| >= 0.7, bookmom:
-                         only when that strong book and the 5 s price trend agree; book and bookmom skip the
-                         other rounds); HawkesTime is scored but can't call
-  stakes 1|1.5|2  the PAPER ladders' progression after a loss (real orders are always flat)
+  model <name>    which model makes the calls: value|fade|fade_strict|fade_flow|fade_flow2|fade_hawkes|fade_fair|overshoot|overshoot_rel|overshoot_book|
+                  revert|prob|ens|trees_mid|thin|sign  (value: chance from the gap x payout at least 1.05; thin: no prediction, the side that pays x2.10+; fade: against bc.game's gap from the market; prob, ens:
+                  P(UP) fitted on the logged rounds, each calls only when it is at least 56% one way; sign:
+                  HawkesSign).  Momentum, book, jump, MHH and HawkesTime were removed on 2026-11-11, P(UP) trees on 2026-11-16.
+  stakes 1|1.5|2  the stake rule after a loss, on paper AND for real orders (1 = flat)
   login           log in again
   help            this text
   quit            stop the bot (browser stays open)"""
@@ -103,7 +100,7 @@ async def repl(trader: Trader, auto: AutoTrader, cfg: config.Config) -> None:
                 print(auto.line())
             elif cmd == "stakes" and args:
                 auto.set_progression(float(args[0]))
-                print(f"paper ladders: x{auto.progression:g} after a loss; real orders stay flat ${auto.stake():g}")
+                print(f"stake rule: x{auto.progression:g} after a loss, on paper and for real orders; next real stake ${auto.stake():g}")
             elif cmd == "live":
                 if not args:
                     print(auto.live_line())
@@ -147,6 +144,45 @@ async def repl(trader: Trader, auto: AutoTrader, cfg: config.Config) -> None:
             print("Amount must be a number, e.g. 'up 5'")
 
 
+async def connect_trading(trader, auto, tap, args, sleep=asyncio.sleep) -> None:
+    """Connect the game while the local dashboard remains available."""
+    while True:
+        try:
+            restricted = await trader.page.evaluate(
+                "() => !!document.body && /we\\s+do\\s+not\\s+accept\\s+players\\s+from\\s+your\\s+region/i.test(document.body.innerText)")
+            if restricted:
+                auto.startup_problem = ("BC.GAME is showing a region restriction. The local dashboard and saved "
+                                        "research results remain available; the game connection is unavailable.")
+                await sleep(30)
+                continue
+            auto.startup_problem = "Connecting to BC.GAME; the local dashboard and research results remain available."
+            await trader.ensure_ready()
+            if not args.no_login:
+                await trader.login()
+            st = await trader.wait_loaded()
+            log.info(st.line())
+            if args.auto:
+                await auto.start()
+            auto.startup_problem = None
+            if tap is not None:
+                delay = float(os.getenv("TAP_START_DELAY_S", "25"))
+
+                async def start_tap_later():
+                    await sleep(delay)
+                    try:
+                        await tap.start()
+                    except Exception as e:
+                        log.warning("Tap analyzer did not start: %r", e)
+
+                log.info("Tap analyzer opens its tab in %g s", delay)
+                asyncio.create_task(start_tap_later())
+            return
+        except Exception as e:
+            auto.startup_problem = "BC.GAME has not connected yet. The local dashboard and saved research results remain available."
+            log.warning("Game connection not ready (%s); keeping the dashboard online", type(e).__name__)
+            await sleep(30)
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="bc.game Up/Down bot")
     parser.add_argument("--no-repl", action="store_true", help="HTTP API only; don't read commands from stdin")
@@ -161,40 +197,21 @@ async def main() -> None:
     async with async_playwright() as pw:
         page = await open_trade_page(pw, cfg)
         trader = Trader(page, cfg, reopen=lambda: open_trade_page(pw, cfg))
-        await trader.ensure_ready()
-        if not args.no_login:
-            await trader.login()
-        st = await trader.wait_loaded()
-        log.info(st.line())
-        if st.account == "REAL":
-            log.warning("REAL account: orders spend real funds (%s). Max per order: $%g (MAX_USD). Real orders "
-                        "are off until 'live arm ...'%s", st.currency, cfg.max_usd,
-                        "" if cfg.live_allowed else " (and LIVE_ALLOWED=1 in .env)")
-
         auto = AutoTrader(trader, cfg)
-        if args.auto:
-            await auto.start()
-        tap = None
-        if not args.no_tap:                      # Tap analyzer: its own bc.game tab, page /tap; its tab opens a
-            tap = TapAnalyzer(trader, cfg.auto_log.parent)   # little after the Up/Down page (two game launches
-            delay = float(os.getenv("TAP_START_DELAY_S", "25"))   # at once trip bc.game's launch limit)
-
-            async def start_tap_later():
-                await asyncio.sleep(delay)
-                try:
-                    await tap.start()
-                except Exception as e:
-                    log.warning("Tap analyzer did not start: %r", e)
-
-            log.info("Tap analyzer opens its tab in %g s", delay)
-            asyncio.get_running_loop().create_task(start_tap_later())
+        auto.restore_history()
+        auto.startup_problem = "Connecting to BC.GAME; research results remain available."
+        tap = None if args.no_tap else TapAnalyzer(trader, cfg.auto_log.parent)
         runner = await api.start(trader, auto, cfg, tap)
+        connection = asyncio.create_task(connect_trading(trader, auto, tap, args))
         try:
             if args.no_repl:
                 await asyncio.Event().wait()
             else:
                 await repl(trader, auto, cfg)
         finally:
+            connection.cancel()
+            with suppress(asyncio.CancelledError):
+                await connection
             await runner.cleanup()
     log.info("Bot stopped. The browser window stays open; the next start re-attaches to it.")
 

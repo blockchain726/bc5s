@@ -1,0 +1,30 @@
+{
+  "algorithm": "hierarchical probability tables: gap prior, signed changing queue pressure, price response",
+  "candidates": "3 pressure recipes x 2 shrinkage strengths x 2 hierarchy depths x 2 time decays",
+  "selection": "highest pooled chronological CV Wilson95 lower win rate; >=200 calls; coverage 8%-50%",
+  "cv": "3 expanding past-only folds; settlement+60 seconds before calibration and validation",
+  "call_policy": "confidence level from past calibration block, targeting 20% of recorded book-covered rounds",
+  "test": "real rounds appended after the earlier frozen log, with a 60-second settlement embargo",
+  "caveat": "historical corpus has been examined before; this is not a never-seen or prospective proof",
+  "payout": "flat $1 added to final chosen pool, 5% fee; final pools score return only",
+  "training_data": {
+    "snapshot_bytes": 83025727,
+    "sha256": "99c86fbde4f1e22a8ca406a4078b420fb9bc7b048232be154248e70fe6d1f63e",
+    "rows": 20205,
+    "excluded": {
+      "invalid_or_tie": 5225,
+      "invalid_timing": 4
+    }
+  },
+  "test_data": {
+    "snapshot_bytes": 86715269,
+    "sha256": "09b6056c9fba9711138df4699926de5689e0665869b17738e68e859e849b2e74",
+    "rows": 20902,
+    "excluded": {
+      "invalid_or_tie": 5279,
+      "invalid_timing": 4
+    }
+  },
+  "test_first_at": 1795002711.364,
+  "test_last_at": 1795025556.52
+}

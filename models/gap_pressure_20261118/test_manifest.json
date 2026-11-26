@@ -1,0 +1,290 @@
+[
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_11.bin",
+    "rows_read": 5328,
+    "first_row": 30664,
+    "sha256_of_rows": "4173629b9bf777b7dc0ffe27e6f86b16815f653932448182d5470aa7f96b4bbf"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_12.bin",
+    "rows_read": 35975,
+    "first_row": 0,
+    "sha256_of_rows": "fdbe4e27813d0fa383f2b988aee71febe6e1fda7932353c1e625bdb8bf9edaa8"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_13.bin",
+    "rows_read": 35999,
+    "first_row": 0,
+    "sha256_of_rows": "60fa5528dc8713b67f8ccae467b7a117aec5d717c865b54d1cca25a783a96ea6"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_14.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "575f4476fcbfe1b458cb51f6684e0624bda4ce653168daf6d1b89b55594c1bed"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_15.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "68db3757f376e6c530fb59bc77da24fa76ed42af66a05b9b87845c1fc002de8c"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_16.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "24c40b44ec6f77354f1f14243d4313f293cb1aa26b214ac24ad35f8520a91aec"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_17.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "9201f71e7ce057ce77bc7c9b2313fc7f1c59e02b88cbae060e0ca0959482f291"
+  },
+  {
+    "file": "logs\\obrec\\bitfinex_perp_20261118_18.bin",
+    "rows_read": 7570,
+    "first_row": 0,
+    "sha256_of_rows": "56e23ffcb87d4972d1e4ca42b8ef190fe2d3654f74edb58e3c97cb064767faff"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_11.bin",
+    "rows_read": 5328,
+    "first_row": 30664,
+    "sha256_of_rows": "068aad027595d4bef62b7bdfa5bbffb8a69b30b92c5134a1efe1d940bdf3b2c8"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_12.bin",
+    "rows_read": 35975,
+    "first_row": 0,
+    "sha256_of_rows": "530c488d8452511fa593aff9afd86d890a8375f8cd13d63e08a54548a13e7d6b"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_13.bin",
+    "rows_read": 35999,
+    "first_row": 0,
+    "sha256_of_rows": "d7082a0fa7bae3dc4eff31b940778b1a38c7bb0ebe0c8b24e70b3d2efd627509"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_14.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "df0faeb7a99f4828ff387ad43e11685d90aedef2444b7d847fc45c8660a9227c"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_15.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "ec17434da0e8ce7c0432d75087b679cb15230b8bd60758c306ea3b464bd2abdf"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_16.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "a5e7bb182c5841ff81f3a33bc2406b66b4f58cc20bb9090e17259f9681ab9605"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_17.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "594f56a97aa6fc7c4059ccc576ede99514acd209834eeb8cdf3756d4b0ca4a3c"
+  },
+  {
+    "file": "logs\\obrec\\bybit_perp_20261118_18.bin",
+    "rows_read": 7570,
+    "first_row": 0,
+    "sha256_of_rows": "2fb67a2fa5730dfce9926098244eeb6e6d3b56356d19bdfcb466a64232faf731"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_11.bin",
+    "rows_read": 5328,
+    "first_row": 30664,
+    "sha256_of_rows": "08b6ef3ba132b27dcfc8097cc08bfb0d0cc47aa4f8211ac07bdaaf4f2fcd8e16"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_12.bin",
+    "rows_read": 35975,
+    "first_row": 0,
+    "sha256_of_rows": "130092bb03aa1905cec4a5ee4a56e379da2b3e2f362912ff6950a3e44bcf543f"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_13.bin",
+    "rows_read": 35999,
+    "first_row": 0,
+    "sha256_of_rows": "f08817f0d1cfa21870ed566287efc7ba0c0614a551f1af500861e9b10c58c4a6"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_14.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "3bf07ea223617f242737b6aa6219084eccf13b4a2d469277c2c355a95141d939"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_15.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "cd37ce74088ca345d56f19c47ef3284522eb44f151d83334e7d6acb94b60c373"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_16.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "78fad1aa12790b67453160505281311659a1c401e66106672818bfc5f6d4cbb3"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_17.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "35f6de8f426ef7aa0c670c322de746109acee5e181c3cae221963260a6989866"
+  },
+  {
+    "file": "logs\\obrec\\okx_perp_20261118_18.bin",
+    "rows_read": 7570,
+    "first_row": 0,
+    "sha256_of_rows": "6de6e351a5194b8bf7022b8f46b904ce0af361b004c218cd2754e29a28fa2b83"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_11.bin",
+    "rows_read": 5328,
+    "first_row": 30664,
+    "sha256_of_rows": "b49f050a565b8e38fc7be948357b46b77d3621749bd35cd684d7c24276625fd6"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_12.bin",
+    "rows_read": 35975,
+    "first_row": 0,
+    "sha256_of_rows": "14463a168b06586959d52390222b76bf644fe12d63850496ab5a5c31450051cb"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_13.bin",
+    "rows_read": 35999,
+    "first_row": 0,
+    "sha256_of_rows": "a8e422006e42c5bf6b067327a05eb3cf3b790d699ac3c3dd9bbc45875368022c"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_14.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "091916de42590f76cd458c174cd824968be69be05e3f88aedf4ff922322adac5"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_15.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "bb0c9dd4ff7068640bafd6914ad3ce95ff9e1b766a27ac713b5638a34c986114"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_16.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "3ad7564363972a0e5ea79b60d039c5a5811ebf92554188ede8d6c7b3b5e3b451"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_17.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "8a3e24eba2e894854c315e930b905a504dd457d70c6f393d7339bd013b1b21d8"
+  },
+  {
+    "file": "logs\\obrec\\okx_20261118_18.bin",
+    "rows_read": 7570,
+    "first_row": 0,
+    "sha256_of_rows": "2fc17cecf8f8e1edca5af23b3a9c3fed2fce5e1c426a16de065469ad77aa4a5c"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_11.bin",
+    "rows_read": 5328,
+    "first_row": 30664,
+    "sha256_of_rows": "01abe8b5c61a346e912f84dd31fdb9d95f60f652a36c9bdee723c55961427299"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_12.bin",
+    "rows_read": 35975,
+    "first_row": 0,
+    "sha256_of_rows": "704610c67de681abb01144745c755ad68ecd77645399cdc2dbe686932af41d02"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_13.bin",
+    "rows_read": 35999,
+    "first_row": 0,
+    "sha256_of_rows": "048731918e32f5081e036dfbea14d0985f83bb8bd6d6ec5da10881eda80f0f6d"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_14.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "2fc8ced9c576710736a0324d756872a17ee80e6f9f261b6eb3d7e107180a199e"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_15.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "3939cfa2d9e9720b15be77db15e41ef5d35b412158dcc9f5547dd48f33bfacb4"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_16.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "8c1a6365f4aa08b4019d8f3756a0f18fd6511cd14e12669f1625f1bc6f11c445"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_17.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "461be7d57d80f1bcb092907f973d089aef3cebd816ec4a140fdd70a2c3d9f952"
+  },
+  {
+    "file": "logs\\obrec\\binance_perp_20261118_18.bin",
+    "rows_read": 7570,
+    "first_row": 0,
+    "sha256_of_rows": "219581ed18802905ef439d46b6c04f8e72d0c69643819a9a656735622bfbd182"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_11.bin",
+    "rows_read": 5328,
+    "first_row": 30664,
+    "sha256_of_rows": "7c196dcf9be831b8ac79da52a9781f5a42d8b6e91eb060ae4fd29eae9f73f3fb"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_12.bin",
+    "rows_read": 35975,
+    "first_row": 0,
+    "sha256_of_rows": "a393df2d254dc0c73c8fa3091d15c229391f22861f6d49c61370f3267f626ebf"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_13.bin",
+    "rows_read": 35999,
+    "first_row": 0,
+    "sha256_of_rows": "966ceb0809fc0100aea86cc97252b0f3304255f4f4421a98cf961bec283ef97b"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_14.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "7044958b489cf2daa11a2e9121aca1d9aa469f393bc16b6ba9513f9a6607df4a"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_15.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "fc00ff22c7c587339980653b0d69e84b060627319ab1af806ea21d5afaa11bb8"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_16.bin",
+    "rows_read": 35998,
+    "first_row": 0,
+    "sha256_of_rows": "4db4ceee13a3ce6a6ca2fb6bbc985ae1a87cfc1282214cf9584c6bc6ae44f3d2"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_17.bin",
+    "rows_read": 36000,
+    "first_row": 0,
+    "sha256_of_rows": "9488b273139fc302002f3ff10ff799822675a32d7a1e1a27fea773e9f56180ae"
+  },
+  {
+    "file": "logs\\obrec\\coinbase_20261118_18.bin",
+    "rows_read": 7570,
+    "first_row": 0,
+    "sha256_of_rows": "35ed88821b8f4bffe0674330e16f269a1099f4e00b1092bb814475fdaec3a217"
+  }
+]

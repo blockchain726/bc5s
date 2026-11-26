@@ -1,0 +1,25 @@
+{
+  "target": "actual BC end_price > start_price; one observed decision per real settled round",
+  "inputs": "decision snapshot and books received by its PC timestamp; no end/start prices or final pools",
+  "split": "earliest 60% book-covered rounds development, next 20% calibration, final 20% historical test",
+  "cv": "three expanding past-only folds; 60 seconds purged by settlement time; trailing training block calibrates each fold",
+  "selection_all": "pooled chronological-CV accuracy, then lower log loss",
+  "selection_selective": "largest pooled Wilson95 lower accuracy; >=200 calls and >=10% coverage; target top 25%",
+  "calibration": "logit temperature in [0.001,2], fit only before the scored block",
+  "payout": "flat hypothetical $1: win 0.95 * opposite_final_pool / (own_final_pool + 1); loss -1",
+  "inference": "UP/DOWN symmetric; no bias, mirrored trees; no prediction with insufficient books",
+  "caveat": "history was examined previously; historical holdout is not prospective proof",
+  "threads": 2,
+  "seed": 181126,
+  "data": {
+    "snapshot_bytes": 83025727,
+    "sha256": "99c86fbde4f1e22a8ca406a4078b420fb9bc7b048232be154248e70fe6d1f63e",
+    "rows": 20205,
+    "excluded": {
+      "invalid_or_tie": 5225,
+      "invalid_timing": 4
+    }
+  },
+  "test_first_at": 1794967190.911,
+  "test_last_at": 1795002620.783
+}

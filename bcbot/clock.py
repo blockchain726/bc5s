@@ -83,6 +83,23 @@ class BcClock:
         d = self.med_diff()
         return d is not None and abs(d) <= self.med_diff_s
 
+    def usable(self) -> bool:
+        """The clock can time an order: the offset is known and its 20 s and 60 s medians agree.  ok() also asks for
+        a tick in the last second; a late tick alone does not make the offset wrong (it is a median over a minute),
+        and since 2026-11-17 it no longer holds a real order back (the owner's decision)."""
+        if self.offset() is None:
+            return False
+        d = self.med_diff()
+        return d is not None and abs(d) <= self.med_diff_s
+
+    def why_not_usable(self) -> str | None:
+        if self.offset() is None:
+            return f"only {len(self.samples)} ticks in the last {self.window_s:.0f} s"
+        d = self.med_diff()
+        if d is None or abs(d) > self.med_diff_s:
+            return f"medians disagree by {d:+.2f} s" if d is not None else "no tick in the last 20 s"
+        return None
+
     def why_not_ok(self) -> str | None:
         if self.offset() is None:
             return f"only {len(self.samples)} ticks in the last {self.window_s:.0f} s"

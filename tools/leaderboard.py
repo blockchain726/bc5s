@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from bcbot.auto import AutoTrader, MODEL_REGISTERED  # noqa: E402
 
-LABELS = {**AutoTrader.MODELS, "mhh_hi": "MHH confident", "pool": "Pool thin side"}
+LABELS = {**AutoTrader.MODELS, "pool": "Pool thin side"}
 BREAK_EVEN = 0.5155
 
 
@@ -29,7 +29,10 @@ def wilson(k, n, z=1.96):
 def stats_from_api():
     try:
         with urllib.request.urlopen("http://127.0.0.1:8765/auto", timeout=5) as r:
-            return json.load(r)["stats"], "the running bot"
+            d = json.load(r)
+        if d.get("fair_price"):                    # the new price's model is registered only in a process that has
+            MODEL_REGISTERED["fade_fair"] = d["fair_price"]["registered"]      # loaded its recipe: the bot's
+        return d["stats"], "the running bot"
     except Exception:
         return None, None
 

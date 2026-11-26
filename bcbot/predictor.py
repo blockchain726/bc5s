@@ -90,14 +90,16 @@ class HawkesPredictor:
                             "branching_time": np.round(self.mhp_time.branching, 3).tolist()}
         return self.info
 
-    def predict(self, a: float, b: float) -> dict:
+    def predict(self, a: float, b: float, at: float | None = None) -> dict:
         """Blocking.  Forecast for the window that starts `a` seconds from now and ends `b` seconds from now (the
-        caller measures both on bc.game's clock; this feed's own clock is only used for its event history)."""
+        caller measures both on bc.game's clock; this feed's own clock is only used for its event history).
+        `at` (this feed's clock): make the forecast as of that earlier instant, from the events up to it, with a and
+        b counted from it: the same forecast as if it had been asked then, computed later."""
         if not self.ready:
             return {"ready": False}
         t_calc = time.perf_counter()
         feed = self.feed
-        now = feed.now()
+        now = feed.now() if at is None else at
         lead = a
         a, b = max(a, 0.0), max(b, 0.0)
 
@@ -147,7 +149,7 @@ class HawkesPredictor:
             "sign_p_up": ups / n_sign,                  # HawkesSign P(UP over the window)
             "sign_p_next_up": net_next / n_sign,
             "sims": [len(sums), n_sign],                # simulations done (N_SIMS unless the time budget ran out)
-            "bi": float(bv[-1]) if len(bv) else 0.0,
+            "bi": float(bv[max(int(np.searchsorted(bt, now, side="right")) - 1, 0)]) if len(bv) else 0.0,
             "lead_s": round(lead, 3),                   # window start minus the decision time (bc.game's clock)
             "calc_ms": round((time.perf_counter() - t_calc) * 1000),
         }

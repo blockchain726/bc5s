@@ -1,0 +1,917 @@
+{
+  "created_utc": "2026-11-18T11:52:44+00:00",
+  "protocol": {
+    "target": "actual BC end_price > start_price; one observed decision per real settled round",
+    "inputs": "decision snapshot and books received by its PC timestamp; no end/start prices or final pools",
+    "split": "earliest 60% book-covered rounds development, next 20% calibration, final 20% historical test",
+    "cv": "three expanding past-only folds; 60 seconds purged by settlement time; trailing training block calibrates each fold",
+    "selection_all": "pooled chronological-CV accuracy, then lower log loss",
+    "selection_selective": "largest pooled Wilson95 lower accuracy; >=200 calls and >=10% coverage; target top 25%",
+    "calibration": "logit temperature in [0.001,2], fit only before the scored block",
+    "payout": "flat hypothetical $1: win 0.95 * opposite_final_pool / (own_final_pool + 1); loss -1",
+    "inference": "UP/DOWN symmetric; no bias, mirrored trees; no prediction with insufficient books",
+    "caveat": "history was examined previously; historical holdout is not prospective proof",
+    "threads": 2,
+    "seed": 181126
+  },
+  "data": {
+    "snapshot_bytes": 83025727,
+    "sha256": "99c86fbde4f1e22a8ca406a4078b420fb9bc7b048232be154248e70fe6d1f63e",
+    "rows": 20205,
+    "excluded": {
+      "invalid_or_tie": 5225,
+      "invalid_timing": 4
+    }
+  },
+  "book_rows": 5681,
+  "chosen": {
+    "all": {
+      "spec": {
+        "name": "lgbm_book_240",
+        "kind": "lgbm",
+        "group": "book",
+        "rounds": 240
+      },
+      "all": {
+        "calls": 2044,
+        "wins": 1078,
+        "coverage": 1.0,
+        "calls_per_observed_hour": 120.0,
+        "accuracy": 0.5273972602739726,
+        "wilson95": [
+          0.505722356113505,
+          0.548969373949992
+        ],
+        "accuracy_hour95": [
+          0.5050200405425187,
+          0.5479950840168129
+        ],
+        "payout_rows": 2044,
+        "roi": 0.022446101745555957,
+        "net_flat_1": 45.87983196791638,
+        "roi_hour95": [
+          -0.022023736162117783,
+          0.06280279157113841
+        ],
+        "by_utc_day": {
+          "2026-11-16": {
+            "calls": 762,
+            "wins": 393
+          },
+          "2026-11-17": {
+            "calls": 1282,
+            "wins": 685
+          }
+        }
+      },
+      "selected": {
+        "calls": 541,
+        "wins": 277,
+        "coverage": 0.26467710371819964,
+        "calls_per_observed_hour": 31.761252446183956,
+        "accuracy": 0.512014787430684,
+        "wilson95": [
+          0.46995742103740495,
+          0.5539027247370736
+        ],
+        "accuracy_hour95": [
+          0.4700941640315415,
+          0.5465859213250518
+        ],
+        "payout_rows": 541,
+        "roi": -0.012606488337798592,
+        "net_flat_1": -6.820110190749045,
+        "roi_hour95": [
+          -0.09534898717058758,
+          0.054780688453693785
+        ],
+        "by_utc_day": {
+          "2026-11-16": {
+            "calls": 234,
+            "wins": 116
+          },
+          "2026-11-17": {
+            "calls": 307,
+            "wins": 161
+          }
+        }
+      },
+      "log_loss": 0.6928168557428942,
+      "folds": [
+        {
+          "train_rows": 1087,
+          "train_last_end": 1794840774.667,
+          "calibration_first_at": 1794840856.738,
+          "calibration_last_end": 1794849780.646,
+          "validation_first_at": 1794849863.686,
+          "all": {
+            "calls": 681,
+            "wins": 343,
+            "coverage": 1.0,
+            "calls_per_observed_hour": 120.0,
+            "accuracy": 0.5036710719530103,
+            "wilson95": [
+              0.46620327758623464,
+              0.5410976807667626
+            ],
+            "accuracy_hour95": [
+              0.46011118912510507,
+              0.5406728468899522
+            ],
+            "payout_rows": 681,
+            "roi": -0.02666299908855249,
+            "net_flat_1": -18.157502379304248,
+            "roi_hour95": [
+              -0.1128382741469455,
+              0.04717787864967267
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 681,
+                "wins": 343
+              }
+            }
+          },
+          "selected": {
+            "calls": 220,
+            "wins": 107,
+            "coverage": 0.32305433186490456,
+            "calls_per_observed_hour": 38.76651982378855,
+            "accuracy": 0.4863636363636364,
+            "wilson95": [
+              0.42111944404533,
+              0.552075886938723
+            ],
+            "accuracy_hour95": [
+              0.3948173515981735,
+              0.5586854460093896
+            ],
+            "payout_rows": 220,
+            "roi": -0.06528949637380647,
+            "net_flat_1": -14.363689202237428,
+            "roi_hour95": [
+              -0.2445089297896999,
+              0.06926399645654287
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 220,
+                "wins": 107
+              }
+            }
+          },
+          "temperature": 0.40553380584489584,
+          "threshold": 0.5285307057942306
+        },
+        {
+          "train_rows": 1632,
+          "train_last_end": 1794858457.465,
+          "calibration_first_at": 1794858540.029,
+          "calibration_last_end": 1794871117.48,
+          "validation_first_at": 1794871201.314,
+          "all": {
+            "calls": 681,
+            "wins": 363,
+            "coverage": 1.0,
+            "calls_per_observed_hour": 120.0,
+            "accuracy": 0.5330396475770925,
+            "wilson95": [
+              0.49548749540004494,
+              0.5702211297769305
+            ],
+            "accuracy_hour95": [
+              0.48526597166533014,
+              0.5720006993006993
+            ],
+            "payout_rows": 681,
+            "roi": 0.033686630475113076,
+            "net_flat_1": 22.94059535355201,
+            "roi_hour95": [
+              -0.05860685189305271,
+              0.11029723689409417
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 81,
+                "wins": 50
+              },
+              "2026-11-17": {
+                "calls": 600,
+                "wins": 313
+              }
+            }
+          },
+          "selected": {
+            "calls": 141,
+            "wins": 75,
+            "coverage": 0.20704845814977973,
+            "calls_per_observed_hour": 24.845814977973568,
+            "accuracy": 0.5319148936170213,
+            "wilson95": [
+              0.4498010044596747,
+              0.612335840203737
+            ],
+            "accuracy_hour95": [
+              0.4887575874983856,
+              0.5793650793650794
+            ],
+            "payout_rows": 141,
+            "roi": 0.02233643835243773,
+            "net_flat_1": 3.1494378076937215,
+            "roi_hour95": [
+              -0.05814767475946518,
+              0.11940583235768179
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 14,
+                "wins": 9
+              },
+              "2026-11-17": {
+                "calls": 127,
+                "wins": 66
+              }
+            }
+          },
+          "temperature": 0.4707955781888186,
+          "threshold": 0.5377647485734921
+        },
+        {
+          "train_rows": 2177,
+          "train_last_end": 1794884279.974,
+          "calibration_first_at": 1794884362.891,
+          "calibration_last_end": 1794900756.006,
+          "validation_first_at": 1794900837.161,
+          "all": {
+            "calls": 682,
+            "wins": 372,
+            "coverage": 1.0,
+            "calls_per_observed_hour": 120.0,
+            "accuracy": 0.5454545454545454,
+            "wilson95": [
+              0.5079331296606575,
+              0.5824667527611727
+            ],
+            "accuracy_hour95": [
+              0.5228485680117748,
+              0.5768096066167875
+            ],
+            "payout_rows": 682,
+            "roi": 0.06025914808455809,
+            "net_flat_1": 41.096738993668616,
+            "roi_hour95": [
+              0.016617532999484156,
+              0.12386465262378131
+            ],
+            "by_utc_day": {
+              "2026-11-17": {
+                "calls": 682,
+                "wins": 372
+              }
+            }
+          },
+          "selected": {
+            "calls": 180,
+            "wins": 95,
+            "coverage": 0.26392961876832843,
+            "calls_per_observed_hour": 31.671554252199414,
+            "accuracy": 0.5277777777777778,
+            "wilson95": [
+              0.45502894184771125,
+              0.5993657109403411
+            ],
+            "accuracy_hour95": [
+              0.48186528497409326,
+              0.5829250418760469
+            ],
+            "payout_rows": 180,
+            "roi": 0.024411895576636998,
+            "net_flat_1": 4.394141203794662,
+            "roi_hour95": [
+              -0.0695341091756743,
+              0.14172674422866646
+            ],
+            "by_utc_day": {
+              "2026-11-17": {
+                "calls": 180,
+                "wins": 95
+              }
+            }
+          },
+          "temperature": 0.3122132867867193,
+          "threshold": 0.5209439047739425
+        }
+      ]
+    },
+    "selective": {
+      "spec": {
+        "name": "xgb_all_80",
+        "kind": "xgb",
+        "group": "all",
+        "rounds": 80
+      },
+      "all": {
+        "calls": 2044,
+        "wins": 1076,
+        "coverage": 1.0,
+        "calls_per_observed_hour": 120.0,
+        "accuracy": 0.5264187866927593,
+        "wilson95": [
+          0.5047434383532844,
+          0.5479950156365164
+        ],
+        "accuracy_hour95": [
+          0.49405411387278353,
+          0.5575515548808622
+        ],
+        "payout_rows": 2044,
+        "roi": 0.021874035531862224,
+        "net_flat_1": 44.71052862712638,
+        "roi_hour95": [
+          -0.0424417483264303,
+          0.08358622989380224
+        ],
+        "by_utc_day": {
+          "2026-11-16": {
+            "calls": 762,
+            "wins": 392
+          },
+          "2026-11-17": {
+            "calls": 1282,
+            "wins": 684
+          }
+        }
+      },
+      "selected": {
+        "calls": 636,
+        "wins": 344,
+        "coverage": 0.3111545988258317,
+        "calls_per_observed_hour": 37.3385518590998,
+        "accuracy": 0.5408805031446541,
+        "wilson95": [
+          0.5020212929767012,
+          0.5792488213766012
+        ],
+        "accuracy_hour95": [
+          0.5092582742316786,
+          0.5745767837616185
+        ],
+        "payout_rows": 636,
+        "roi": 0.050363675463747856,
+        "net_flat_1": 32.03129759494363,
+        "roi_hour95": [
+          -0.011493609543396973,
+          0.1176160448133864
+        ],
+        "by_utc_day": {
+          "2026-11-16": {
+            "calls": 276,
+            "wins": 141
+          },
+          "2026-11-17": {
+            "calls": 360,
+            "wins": 203
+          }
+        }
+      },
+      "log_loss": 0.6918755304582164,
+      "folds": [
+        {
+          "train_rows": 1087,
+          "train_last_end": 1794840774.667,
+          "calibration_first_at": 1794840856.738,
+          "calibration_last_end": 1794849780.646,
+          "validation_first_at": 1794849863.686,
+          "all": {
+            "calls": 681,
+            "wins": 347,
+            "coverage": 1.0,
+            "calls_per_observed_hour": 120.0,
+            "accuracy": 0.5095447870778267,
+            "wilson95": [
+              0.47204982617999985,
+              0.5469326655377929
+            ],
+            "accuracy_hour95": [
+              0.4419970631424376,
+              0.5656167979002624
+            ],
+            "payout_rows": 681,
+            "roi": -0.015283905643573412,
+            "net_flat_1": -10.40833974327349,
+            "roi_hour95": [
+              -0.1449967370508443,
+              0.09177378393505266
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 681,
+                "wins": 347
+              }
+            }
+          },
+          "selected": {
+            "calls": 259,
+            "wins": 132,
+            "coverage": 0.3803230543318649,
+            "calls_per_observed_hour": 45.63876651982379,
+            "accuracy": 0.5096525096525096,
+            "wilson95": [
+              0.44907493755122246,
+              0.5699479264094292
+            ],
+            "accuracy_hour95": [
+              0.46363343737807255,
+              0.5488958990536278
+            ],
+            "payout_rows": 259,
+            "roi": -0.010914243711874636,
+            "net_flat_1": -2.826789121375531,
+            "roi_hour95": [
+              -0.10289579803900441,
+              0.06707160386838089
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 259,
+                "wins": 132
+              }
+            }
+          },
+          "temperature": 0.6362276071942239,
+          "threshold": 0.5220417976379395
+        },
+        {
+          "train_rows": 1632,
+          "train_last_end": 1794858457.465,
+          "calibration_first_at": 1794858540.029,
+          "calibration_last_end": 1794871117.48,
+          "validation_first_at": 1794871201.314,
+          "all": {
+            "calls": 681,
+            "wins": 365,
+            "coverage": 1.0,
+            "calls_per_observed_hour": 120.0,
+            "accuracy": 0.5359765051395007,
+            "wilson95": [
+              0.49842301032747033,
+              0.5731263815319025
+            ],
+            "accuracy_hour95": [
+              0.49195402298850577,
+              0.5667596788529631
+            ],
+            "payout_rows": 681,
+            "roi": 0.04098249182834195,
+            "net_flat_1": 27.909076935100863,
+            "roi_hour95": [
+              -0.04598610166780574,
+              0.10132229674740983
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 81,
+                "wins": 45
+              },
+              "2026-11-17": {
+                "calls": 600,
+                "wins": 320
+              }
+            }
+          },
+          "selected": {
+            "calls": 174,
+            "wins": 98,
+            "coverage": 0.2555066079295154,
+            "calls_per_observed_hour": 30.66079295154185,
+            "accuracy": 0.5632183908045977,
+            "wilson95": [
+              0.48894295078141314,
+              0.634762638911887
+            ],
+            "accuracy_hour95": [
+              0.5225191609519968,
+              0.6201753563390848
+            ],
+            "payout_rows": 174,
+            "roi": 0.08732901603250227,
+            "net_flat_1": 15.195248789655395,
+            "roi_hour95": [
+              0.008614226842421576,
+              0.20393329802957164
+            ],
+            "by_utc_day": {
+              "2026-11-16": {
+                "calls": 17,
+                "wins": 9
+              },
+              "2026-11-17": {
+                "calls": 157,
+                "wins": 89
+              }
+            }
+          },
+          "temperature": 0.6641317171762778,
+          "threshold": 0.5303122997283936
+        },
+        {
+          "train_rows": 2177,
+          "train_last_end": 1794884279.974,
+          "calibration_first_at": 1794884362.891,
+          "calibration_last_end": 1794900756.006,
+          "validation_first_at": 1794900837.161,
+          "all": {
+            "calls": 682,
+            "wins": 364,
+            "coverage": 1.0,
+            "calls_per_observed_hour": 120.0,
+            "accuracy": 0.533724340175953,
+            "wilson95": [
+              0.49619928488215564,
+              0.5708715956243635
+            ],
+            "accuracy_hour95": [
+              0.47943037974683544,
+              0.6003254126837975
+            ],
+            "payout_rows": 682,
+            "roi": 0.039897054890467756,
+            "net_flat_1": 27.209791435299007,
+            "roi_hour95": [
+              -0.07009394361450384,
+              0.17423181009970587
+            ],
+            "by_utc_day": {
+              "2026-11-17": {
+                "calls": 682,
+                "wins": 364
+              }
+            }
+          },
+          "selected": {
+            "calls": 203,
+            "wins": 114,
+            "coverage": 0.29765395894428154,
+            "calls_per_observed_hour": 35.71847507331378,
+            "accuracy": 0.5615763546798029,
+            "wilson95": [
+              0.4928009686801359,
+              0.6280644665127847
+            ],
+            "accuracy_hour95": [
+              0.4953271028037383,
+              0.6432449647099329
+            ],
+            "payout_rows": 203,
+            "roi": 0.09686127057469837,
+            "net_flat_1": 19.66283792666377,
+            "roi_hour95": [
+              -0.034314352132595406,
+              0.2687881690631248
+            ],
+            "by_utc_day": {
+              "2026-11-17": {
+                "calls": 203,
+                "wins": 114
+              }
+            }
+          },
+          "temperature": 0.8758235533541413,
+          "threshold": 0.5268126130104065
+        }
+      ]
+    }
+  },
+  "test": {
+    "all": {
+      "calls": 1137,
+      "wins": 584,
+      "coverage": 1.0,
+      "calls_per_observed_hour": 120.0,
+      "accuracy": 0.51363236587511,
+      "wilson95": [
+        0.4845828237948153,
+        0.5425900983707159
+      ],
+      "accuracy_hour95": [
+        0.48776377911476915,
+        0.5392814788978026
+      ],
+      "payout_rows": 1137,
+      "roi": -0.003856108377848473,
+      "net_flat_1": -4.384395225613709,
+      "roi_hour95": [
+        -0.053276018205638265,
+        0.04535911599425962
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1137,
+          "wins": 584
+        }
+      }
+    },
+    "selective": {
+      "calls": 357,
+      "wins": 189,
+      "coverage": 0.31398416886543534,
+      "calls_per_observed_hour": 37.678100263852244,
+      "accuracy": 0.5294117647058824,
+      "wilson95": [
+        0.4775967554610379,
+        0.5806005255619927
+      ],
+      "accuracy_hour95": [
+        0.5014577259475219,
+        0.5581410729666544
+      ],
+      "payout_rows": 357,
+      "roi": 0.02256030043876385,
+      "net_flat_1": 8.054027256638683,
+      "roi_hour95": [
+        -0.026499132682423546,
+        0.07516964632134879
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 357,
+          "wins": 189
+        }
+      }
+    }
+  },
+  "baselines": {
+    "always_up": {
+      "calls": 1137,
+      "wins": 518,
+      "coverage": 1.0,
+      "calls_per_observed_hour": 120.0,
+      "accuracy": 0.455584872471416,
+      "wilson95": [
+        0.42683435942072584,
+        0.48463450707222117
+      ],
+      "accuracy_hour95": [
+        0.44069524987685277,
+        0.4688847278041651
+      ],
+      "payout_rows": 1137,
+      "roi": -0.09393445966037324,
+      "net_flat_1": -106.80348063384437,
+      "roi_hour95": [
+        -0.12412719028140591,
+        -0.06620420757706678
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1137,
+          "wins": 518
+        }
+      }
+    },
+    "ob_logit": {
+      "calls": 1137,
+      "wins": 607,
+      "coverage": 1.0,
+      "calls_per_observed_hour": 120.0,
+      "accuracy": 0.5338610378188214,
+      "wilson95": [
+        0.5047990150726316,
+        0.5626950174030425
+      ],
+      "accuracy_hour95": [
+        0.5106835325932251,
+        0.5669695847229604
+      ],
+      "payout_rows": 1137,
+      "roi": 0.03340001279331878,
+      "net_flat_1": 37.975814546003456,
+      "roi_hour95": [
+        -0.010762110207474298,
+        0.09694374214269981
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1137,
+          "wins": 607
+        }
+      }
+    },
+    "ob_lgbm": {
+      "calls": 1137,
+      "wins": 606,
+      "coverage": 1.0,
+      "calls_per_observed_hour": 120.0,
+      "accuracy": 0.5329815303430079,
+      "wilson95": [
+        0.5039190616604639,
+        0.5618218790625953
+      ],
+      "accuracy_hour95": [
+        0.5047289457854668,
+        0.5615729296631315
+      ],
+      "payout_rows": 1137,
+      "roi": 0.03097466762346713,
+      "net_flat_1": 35.21819708788213,
+      "roi_hour95": [
+        -0.02430575024138995,
+        0.08649026317547508
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1137,
+          "wins": 606
+        }
+      }
+    },
+    "ob_xgb": {
+      "calls": 1137,
+      "wins": 608,
+      "coverage": 1.0,
+      "calls_per_observed_hour": 120.0,
+      "accuracy": 0.534740545294635,
+      "wilson95": [
+        0.5056790585739271,
+        0.5635680656543619
+      ],
+      "accuracy_hour95": [
+        0.5070415947509189,
+        0.5681054997355897
+      ],
+      "payout_rows": 1137,
+      "roi": 0.03459932711523191,
+      "net_flat_1": 39.33943493001869,
+      "roi_hour95": [
+        -0.020171665461383444,
+        0.10043653755582438
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1137,
+          "wins": 608
+        }
+      }
+    },
+    "ob_deeplob": {
+      "calls": 1134,
+      "wins": 595,
+      "coverage": 0.9973614775725593,
+      "calls_per_observed_hour": 119.68337730870712,
+      "accuracy": 0.5246913580246914,
+      "wilson95": [
+        0.4955907099559961,
+        0.5536252793346047
+      ],
+      "accuracy_hour95": [
+        0.5044821336221026,
+        0.5437333877949462
+      ],
+      "payout_rows": 1134,
+      "roi": 0.012848935830583764,
+      "net_flat_1": 14.570693231881997,
+      "roi_hour95": [
+        -0.024378410834572352,
+        0.049401256551136696
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1134,
+          "wins": 595
+        }
+      }
+    },
+    "ob_hawkes": {
+      "calls": 1127,
+      "wins": 576,
+      "coverage": 0.9912049252418645,
+      "calls_per_observed_hour": 118.94459102902374,
+      "accuracy": 0.5110913930789707,
+      "wilson95": [
+        0.48191846953431616,
+        0.5401889591276643
+      ],
+      "accuracy_hour95": [
+        0.4827578571210409,
+        0.5395023229123268
+      ],
+      "payout_rows": 1127,
+      "roi": -0.016182163134971082,
+      "net_flat_1": -18.237297853112413,
+      "roi_hour95": [
+        -0.07158655396363417,
+        0.038621309756591116
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 1127,
+          "wins": 576
+        }
+      }
+    },
+    "ob_steady": {
+      "calls": 198,
+      "wins": 98,
+      "coverage": 0.1741424802110818,
+      "calls_per_observed_hour": 20.897097625329817,
+      "accuracy": 0.494949494949495,
+      "wilson95": [
+        0.42606946189188605,
+        0.5640217779714526
+      ],
+      "accuracy_hour95": [
+        0.4540532774153464,
+        0.5431472081218274
+      ],
+      "payout_rows": 198,
+      "roi": -0.0435598103851356,
+      "net_flat_1": -8.624842456256847,
+      "roi_hour95": [
+        -0.1202247531976188,
+        0.04745291788902818
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 198,
+          "wins": 98
+        }
+      }
+    },
+    "gap_from_2x": {
+      "calls": 130,
+      "wins": 77,
+      "coverage": 0.11433597185576078,
+      "calls_per_observed_hour": 13.720316622691293,
+      "accuracy": 0.5923076923076923,
+      "wilson95": [
+        0.506362966608373,
+        0.6729534791005846
+      ],
+      "accuracy_hour95": [
+        0.4864864864864865,
+        0.6623376623376623
+      ],
+      "payout_rows": 130,
+      "roi": 0.13587306220597298,
+      "net_flat_1": 17.66349808677649,
+      "roi_hour95": [
+        -0.06886589382679557,
+        0.27269221383341075
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 130,
+          "wins": 77
+        }
+      }
+    },
+    "gap_strict": {
+      "calls": 76,
+      "wins": 50,
+      "coverage": 0.06684256816182937,
+      "calls_per_observed_hour": 8.021108179419524,
+      "accuracy": 0.6578947368421053,
+      "wilson95": [
+        0.5459568776794728,
+        0.7546383007738648
+      ],
+      "accuracy_hour95": [
+        0.5584340078526124,
+        0.7349397590361446
+      ],
+      "payout_rows": 76,
+      "roi": 0.2671670262801774,
+      "net_flat_1": 20.304693997293484,
+      "roi_hour95": [
+        0.07635945200198839,
+        0.4081096212569496
+      ],
+      "by_utc_day": {
+        "2026-11-18": {
+          "calls": 76,
+          "wins": 50
+        }
+      }
+    }
+  },
+  "splits": {
+    "development": {
+      "n": 3406,
+      "first_utc": "2026-11-16T05:14:10+00:00",
+      "last_utc": "2026-11-17T13:40:17+00:00"
+    },
+    "calibration": {
+      "n": 1134,
+      "first_utc": "2026-11-17T13:41:47+00:00",
+      "last_utc": "2026-11-18T01:58:19+00:00"
+    },
+    "test": {
+      "n": 1137,
+      "first_utc": "2026-11-18T01:59:50+00:00",
+      "last_utc": "2026-11-18T11:50:20+00:00"
+    }
+  },
+  "output_relative": "models\\ud_best_20261118",
+  "code_sha256": "2d7d7888ada92891ed529d0250e20e3232b773e92ea4bf5e4f4cc9dcf15c2603",
+  "forward_after": 1795002824.5866697
+}

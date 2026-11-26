@@ -16,9 +16,11 @@ import asyncio
 import bisect
 import json
 import logging
+import math
 import statistics
 import time
 from collections import deque
+from pathlib import Path
 
 import aiohttp
 
@@ -41,6 +43,13 @@ STALE_SNAPSHOT = 5.0        # for a feature snapshot or a decision, a price olde
                             # a feed that is silent for 5 s is down, and a dead price must never look fresh
 BOOK_STALE = 3.0            # order flow (OFI) is unknown when the feed's book hasn't updated for this long
 MIN_WEIGHT = 0.75           # a snapshot's mix is unknown when feeds carrying more than 25% of the weight are stale
+# The separate "new price" (2026-11-11): a second mix with its own weights, its own delay per exchange and, if it
+# needs them, more exchanges.  Our price above was fitted to MATCH bc.game's move in the same 5 s (and reads every
+# exchange 0.15 s late to look like it); the Gap fade needs a price that says where bc.game is GOING, so this one is
+# fitted so that bc.game minus it predicts bc.game's move in the round's window.  Its recipe is a file, so that a
+# refit needs no code change; while the file is absent there is no new price and the model on it stays silent.
+# Nothing else reads it: our price, its inputs and every model on them are unchanged until the owner switches.
+FAIR_FILE = Path(__file__).with_name("fair_price.json")
 
 
 class MidFeed:
@@ -195,6 +204,34 @@ def _bitfinex(f, d):
         f.put(mid if mid is not None else (max(book["b"]) + min(book["a"])) / 2)
 
 
+def _kraken(f, d):
+    if d.get("channel") == "ticker":
+        for row in d.get("data") or []:
+            f.book(float(row["bid"]), float(row["bid_qty"]), float(row["ask"]), float(row["ask_qty"]))
+
+
+def _bitstamp(f, d):
+    if d.get("event") == "data":
+        x = d["data"]
+        b, a = x["bids"][0], x["asks"][0]
+        f.book(float(b[0]), float(b[1]), float(a[0]), float(a[1]), int(x["microtimestamp"]) / 1e6)
+
+
+def _deribit(f, d):
+    x = (d.get("params") or {}).get("data")
+    if x:
+        f.book(float(x["best_bid_price"]), float(x["best_bid_amount"]), float(x["best_ask_price"]),
+               float(x["best_ask_amount"]), x["timestamp"] / 1000)
+
+
+def _hyper(f, d):
+    if d.get("channel") == "bbo":
+        x = d["data"]
+        b, a = x["bbo"]
+        if b and a:
+            f.book(float(b["px"]), float(b["sz"]), float(a["px"]), float(a["sz"]), x["time"] / 1000)
+
+
 def _okx_sub(inst):
     return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": inst}]}]
 
@@ -216,12 +253,85 @@ FEEDS = {   # name -> (label, websocket, subscribe messages, parser); "_perp" = 
     "bybit_perp": ("Bybit perp", "wss://stream.bybit.com/v5/public/linear",
                    [{"op": "subscribe", "args": ["orderbook.1.BTCUSDT"]}], _bybit),
     "bitfinex_perp": ("Bitfinex perp", "wss://api-pub.bitfinex.com/ws/2", _bitfinex_sub("tBTCF0:USTF0"), _bitfinex),
+    # only the new price may use these four (they are connected only when its recipe names them)
+    "kraken": ("Kraken", "wss://ws.kraken.com/v2",
+               [{"method": "subscribe", "params": {"channel": "ticker", "symbol": ["BTC/USD"], "event_trigger": "bbo"}}], _kraken),
+    "bitstamp": ("Bitstamp", "wss://ws.bitstamp.net",
+                 [{"event": "bts:subscribe", "data": {"channel": "order_book_btcusd"}}], _bitstamp),
+    "deribit_perp": ("Deribit perp", "wss://www.deribit.com/ws/api/v2",
+                     [{"jsonrpc": "2.0", "id": 1, "method": "public/subscribe",
+                       "params": {"channels": ["quote.BTC-PERPETUAL"]}}], _deribit),
+    "hyper_perp": ("Hyperliquid perp", "wss://api.hyperliquid.xyz/ws",
+                   [{"method": "subscribe", "subscription": {"type": "bbo", "coin": "BTC"}}], _hyper),
 }
 
 
 def make_feeds(names=None) -> dict:
     """The exchange feeds the mix needs (or the named ones)."""
     return {k: MidFeed(*FEEDS[k]) for k in (names or MIX)}
+
+
+def _check_fair_recipe(raw) -> dict:
+    """The recipe as the bot uses it, or a ValueError that says what is wrong with the file."""
+    def num(v, what):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ValueError(f"{what} is not a number")
+        return float(v)
+
+    if not isinstance(raw, dict) or not isinstance(raw.get("mix"), dict) or not raw["mix"]:
+        raise ValueError("no exchanges ('mix')")
+    mix = {}
+    for k, v in raw["mix"].items():
+        if k not in FEEDS:
+            raise ValueError(f"unknown exchange {str(k)[:30]!r}")
+        if not isinstance(v, list) or len(v) != 2:
+            raise ValueError(f"{k} needs [weight, delay]")
+        w, lag = num(v[0], f"the weight of {k}"), num(v[1], f"the delay of {k}")
+        if not 0 < w <= 1e6:
+            raise ValueError(f"the weight of {k} must be above 0")
+        if not 0 <= lag <= 2:
+            raise ValueError(f"the delay of {k} must be 0 to 2 s")
+        mix[k] = (w, lag)
+    window = num(raw.get("level_window", GAP_WINDOW), "level_window")
+    if not 10 <= window <= 600:
+        raise ValueError("level_window must be 10 to 600 s")
+    version = raw.get("version")
+    if type(version) is not int or version < 1:
+        raise ValueError("version must be a whole number from 1")
+    registered = num(raw.get("registered"), "registered")
+    if not 1.6e9 < registered < 4e9:                # the bot formats it as a time: milliseconds would break that
+        raise ValueError("registered must be a time in seconds")
+    total = sum(w for w, _ in mix.values())
+    fitted = raw.get("fitted_utc")                  # a note for people: only short text is passed on (the bot's
+    return {"version": version, "registered": registered, "level_window": window,       # answers must stay JSON)
+            "fitted_utc": fitted[:40] if isinstance(fitted, str) else None,
+            "mix": {k: (round(w / total, 6), lag) for k, (w, lag) in mix.items()}}
+
+
+def read_fair_recipe(path=None) -> tuple:
+    """The new price's recipe from bcbot/fair_price.json and, when the file is there but not usable, why:
+    (recipe, None), (None, None) when there is no file, (None, reason) when it was refused.  Never raises: a bad
+    file must not keep the bot from starting.  The file:
+    {"version": 1, "registered": <epoch s its paper record counts from>, "level_window": 60,
+     "mix": {"<exchange in FEEDS>": [weight, delay in s], ...}}.  The weights are scaled to sum to 1."""
+    p = Path(path or FAIR_FILE)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8-sig"))     # -sig: Notepad and PowerShell 5.1 write a mark first
+    except FileNotFoundError:
+        return None, None
+    except Exception as e:                                      # noqa: BLE001
+        log.warning("new-price recipe %s not readable: %r", p.name, e)
+        return None, f"the file can't be read ({type(e).__name__})"
+    try:
+        return _check_fair_recipe(raw), None
+    except Exception as e:                                      # noqa: BLE001
+        log.warning("new-price recipe %s ignored: %r", p.name, e)
+        return None, str(e)[:120] if isinstance(e, ValueError) and str(e) else type(e).__name__
+
+
+def load_fair_recipe(path=None) -> dict | None:
+    """The new price's recipe, or None when there is none or it is not usable (read_fair_recipe says which)."""
+    return read_fair_recipe(path)[0]
 
 
 def _at(times: list, values: list, t: float, max_age: float = STALE):
@@ -232,17 +342,28 @@ def _at(times: list, values: list, t: float, max_age: float = STALE):
 
 
 class OurPrice:
-    """The weighted, delayed mix.  `feeds` maps exchange name -> MidFeed; times in and out are bc.game server time."""
+    """The weighted, delayed mix.  `feeds` maps exchange name -> MidFeed; times in and out are bc.game server time.
+    `mix` ({exchange: (weight, delay)}) and `gap_window` default to our price's (MIX, GAP_WINDOW); the separate new
+    price is the same class with its own recipe and, as `clock`, our price's clock(): an exchange that sends no time
+    of its own is then read at the same instant by both (and by the recording the recipe is fitted on), whichever
+    exchanges the recipe names."""
 
-    def __init__(self, feeds: dict, bc_ticks: deque):
+    def __init__(self, feeds: dict, bc_ticks: deque, mix: dict | None = None, gap_window: float | None = None,
+                 clock=None):
         self.feeds, self.bc_ticks = feeds, bc_ticks
+        self._clock = clock
+        self.mix = dict(mix) if mix else MIX
+        self.gap_window = gap_window or GAP_WINDOW
         self._gaps: dict = {}
         self._gaps_at = 0.0
 
     def clock(self) -> float:
         """This PC's clock minus the exchanges' clocks (median over the feeds that measure it; 0 until known)."""
         offs = [o for f in self.feeds.values() if (o := f.offset()) is not None]
-        return statistics.median(offs) if offs else 0.0
+        own = statistics.median(offs) if offs else 0.0
+        if self._clock is not None:                 # our price's clock; while that one is not known yet (0.0), the
+            return self._clock() or own             # clock this price's own exchanges measure
+        return own
 
     def server_now(self) -> float:
         return time.time() - self.clock()
@@ -273,9 +394,9 @@ class OurPrice:
         snap = snap or self._snapshot()
         ticks = list(self.bc_ticks)
         t_end = ticks[-1][0] if ticks else 0
-        bc = [r for r in ticks if r[0] >= t_end - GAP_WINDOW]
+        bc = [r for r in ticks if r[0] >= t_end - self.gap_window]
         gaps = {}
-        for k, (w, lag) in MIX.items():
+        for k, (w, lag) in self.mix.items():
             diffs = sorted(v - p for t, p in bc if (v := self._price(snap, k, lag, t)) is not None)
             if diffs:
                 gaps[k] = diffs[len(diffs) // 2]
@@ -288,7 +409,7 @@ class OurPrice:
         snap = snap or self._snapshot()
         gaps = self.gaps(snap)
         num = den = 0.0
-        for k, (w, lag) in MIX.items():
+        for k, (w, lag) in self.mix.items():
             if k not in gaps:
                 continue
             v = self._price(snap, k, lag, t, max_age)
@@ -299,13 +420,13 @@ class OurPrice:
     def stale(self, t: float, snap=None, max_age: float = STALE_SNAPSHOT) -> list:
         """The feeds with no price within max_age of server time t (their names), for a snapshot's dq block."""
         snap = snap or self._snapshot()
-        return [k for k, (w, lag) in MIX.items() if self._price(snap, k, lag, t, max_age) is None]
+        return [k for k, (w, lag) in self.mix.items() if self._price(snap, k, lag, t, max_age) is None]
 
     def now_value(self):
         """Our price now, at bc.game's level; cheap (reads only the newest rows of each feed), for the panel."""
         t, clock, gaps = self.server_now(), self.clock(), self.gaps()
         num = den = 0.0
-        for k, (w, lag) in MIX.items():
+        for k, (w, lag) in self.mix.items():
             f = self.feeds.get(k)
             if f is None or k not in gaps:
                 continue
@@ -322,7 +443,7 @@ class OurPrice:
         """Our price's change from t0 to t1 (no level gaps needed): the Up/Down it gives for a round."""
         snap = self._snapshot()
         num = den = 0.0
-        for k, (w, lag) in MIX.items():
+        for k, (w, lag) in self.mix.items():
             a, b = self._price(snap, k, lag, t0), self._price(snap, k, lag, t1)
             if a is not None and b is not None:
                 num += w * (b - a); den += w
@@ -330,6 +451,8 @@ class OurPrice:
 
     def series(self, t0: float, t1: float, step: float = 0.2) -> list:
         snap = self._snapshot()
+        if not self.gaps(snap):                 # no level for any exchange: no value at any time (an empty table is
+            return []                           # not kept, so every point below would work it out again)
         out, t = [], t0
         while t <= t1:
             v = self.value(t, snap)
@@ -344,7 +467,7 @@ class OurPrice:
         snap = self._snapshot()
         gaps = self.gaps(snap)
         out = {}
-        for k, (w, lag) in MIX.items():
+        for k, (w, lag) in self.mix.items():
             if k not in gaps:
                 continue
             pts, t = [], t0

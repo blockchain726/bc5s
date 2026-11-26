@@ -225,9 +225,10 @@ class Trader:
                 return s
             await asyncio.sleep(0.5)
 
-    async def usd_rate(self, currency: str) -> float:
-        """USD value of 1 unit of `currency`, from bc.game's own price table (cached 60s)."""
-        if time.monotonic() - self._prices_at > 60:
+    async def usd_rate(self, currency: str, max_age: float = 60.0) -> float:
+        """USD value of 1 unit of `currency`, from bc.game's own price table, read again when the copy here is
+        older than `max_age` s.  Reading it is a round trip to the site: 0.6-1.6 s (measured 2026-11-17)."""
+        if time.monotonic() - self._prices_at > max_age:
             t0 = time.monotonic()
             body = await self.page.evaluate(
                 "fetch('/api/game/support/system/conf/usdPrice').then(r => r.json())")

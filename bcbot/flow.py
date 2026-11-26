@@ -1,28 +1,22 @@
-"""The MHH bot's BC 5 s model, ported as-is (mhh-btc-15min-bot pm/bc_updown.py: BinanceSpot, features_from_arrays,
-Predictor): a logistic regression on Binance BTCUSDT order flow, P(UP over the 5 s window starting lead_s from now).
+"""Binance BTCUSDT feeds for the Up/Down bot: the 1 s klines with taker-buy volume (the taker-flow inputs) and the
+best bid/ask mid (a price series), and the top-20 order book imbalance (the panel's OB card and the book inputs).
 
-Features from the last 30 closed 1 s klines, for w in 1, 3, 5, 10, 30 seconds:
-  ret_w = sign(close now - close w s ago)
-  obi_w = (2 * taker-buy volume - volume) / volume over the last w s, clipped to [-1, 1]
-The model file (models/flow5s_logit.json) is MHH's own: fitted on 8 days of Binance data, lead 2 s, horizon 5 s.
+Until 2026-11-11 this file also held the MHH bot's logistic model on that flow ("mhh", "mhh_hi", "agree"); it lost
+(49.5% of 2,985 calls since the last 'P&L -> 0', 49.4% of 13,878 on all logged rounds) and was removed with its model
+file (models/flow5s_logit.json).
 """
 import asyncio
 import json
 import logging
-import math
 import time
 from collections import deque
-from pathlib import Path
 
 import aiohttp
-import numpy as np
 
 log = logging.getLogger(__name__)
 
 STREAM_WS = "wss://stream.binance.com:9443/stream?streams=btcusdt@kline_1s/btcusdt@bookTicker"
 MID_EVERY_S = 0.2        # bookTicker mid sampled at most this often (for the price chart)
-WINDOWS = (1, 3, 5, 10, 30)
-MAX_AGE_S = 2.5          # MHH's max_binance_age_s: the last closed second must be this fresh
 
 
 class BinanceFlow:
@@ -62,16 +56,6 @@ class BinanceFlow:
             self.connected = False
             self.reconnects += 1
             await asyncio.sleep(2)
-
-    def arrays(self, need: int = 31):
-        """Close, volume, taker-buy volume of the last `need` contiguous closed seconds, or None on a gap."""
-        if len(self.ring) < need:
-            return None
-        rows = list(self.ring)[-need:]
-        if rows[-1][0] - rows[0][0] != need - 1:
-            return None
-        a = np.array(rows, float)
-        return a[:, 1], a[:, 2], a[:, 3]
 
     def age(self) -> float:
         return time.time() - (self.last_closed_sec + 1) if self.last_closed_sec else 999.0
@@ -135,35 +119,3 @@ class BinanceBook:
         sec = int(self.at)
         if not self.hist or self.hist[-1][0] != sec:
             self.hist.append((sec, round(self.obi20, 4)))
-
-
-def features_from_arrays(c: np.ndarray, v: np.ndarray, tb: np.ndarray) -> dict:
-    f = {}
-    for w in WINDOWS:
-        f[f"ret{w}"] = float(np.sign(c[-1] - c[-1 - w]))
-        vv, tt = float(v[-w:].sum()), float(tb[-w:].sum())
-        f[f"obi{w}"] = float(np.clip((2 * tt - vv) / max(vv, 1e-9), -1, 1))
-    return f
-
-
-class FlowLogit:
-    def __init__(self, path: Path):
-        m = json.loads(Path(path).read_text(encoding="utf-8"))
-        self.features = m["features"]
-        self.coef = np.array(m["coef"], float)
-        self.intercept = float(m["intercept"])
-        self.lead_ms = int(float(m.get("lead_s", 2)) * 1000)
-        self.q75 = float((m.get("conf_thresholds") or {}).get("q75", 0.0))
-
-    def predict(self, flow: BinanceFlow) -> dict:
-        """{"p_up", "conf", "call"} or {"error": why}."""
-        arrays = flow.arrays(31)
-        if arrays is None:
-            return {"error": "Binance flow: not 31 contiguous seconds yet"}
-        if flow.age() > MAX_AGE_S:
-            return {"error": f"Binance flow stale ({flow.age():.1f}s)"}
-        f = features_from_arrays(*arrays)
-        z = self.intercept + float(np.dot(self.coef, [f[k] for k in self.features]))
-        p = 1.0 / (1.0 + math.exp(-z))
-        return {"p_up": round(p, 4), "conf": round(abs(p - 0.5), 4), "call": "UP" if p >= 0.5 else "DOWN",
-                "age_s": round(flow.age(), 2)}

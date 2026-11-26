@@ -15,6 +15,7 @@ bc.game's clock (clock.py), measured from its own price ticks.
 """
 import asyncio
 import bisect
+import dataclasses
 import calendar
 import html
 import json
@@ -23,16 +24,20 @@ import logging
 import math
 import time
 import zlib
+from array import array
 from collections import deque
 
+import aiohttp
 import numpy as np
 
 from .clock import BcClock
 from .config import Config
-from .flow import BinanceBook, BinanceFlow, FlowLogit
+from .flow import BinanceBook, BinanceFlow
+from .lab_display import read_status as read_lab_status, panel_card as lab_panel_card
 from .lob import LobFeed
+from .obfeat import LIFE_CAP_S, OB_ANSWER, OB_FITTED, OB_MODELS, STEADY_AGE_S, STEADY_MIN, side as _ob_side
 from .prob import ProbModel, REFIT_S as PROB_REFIT_S
-from .ourprice import MIN_WEIGHT, MIX, MIX_VERSION, STALE_SNAPSHOT, OurPrice, make_feeds
+from .ourprice import MIN_WEIGHT, MIX, MIX_VERSION, STALE_SNAPSHOT, OurPrice, make_feeds, read_fair_recipe
 from .predictor import HawkesPredictor
 from .trader import OrderUnknown, TooLate, TradeError, Trader
 
@@ -43,6 +48,10 @@ PRICE = "/kline/BTC-USD/ticker"
 POOLS = "/contest/btc_5/amountPool"     # the round's Up and Down pools ($), as the MHH bot reads them
 PAY_K = 0.9415                 # the page's payout = 1 + 0.9415 x other side's pool / own side's pool (579 rounds)
 POOL_MIN_PAY = 2.0             # the "pool" model takes the thin side when the page pays more than this
+THIN_MIN_PAY = 2.10            # the "thin" model bets the side the page pays at least this on (_thin_call)
+POOL_FEE_K = 0.95              # what bc.game pays on a win: 1 + 0.95 x other pool / own pool at the round's FINAL pools,
+                               # our stake inside our pool (9 real wins by balance move, within 0.007).  PAY_K above is
+                               # the same with the $1 the page has typed in: 0.95 x 110 / 111
 TYPICAL_POOL = 204.0           # median total pool of a round (both sides), for rounds whose pools weren't seen
 BETTING = 1001
 DEFAULT_PAYOUT = 1.94          # average payout the page showed (x1.942), used when it can't be read
@@ -233,61 +242,109 @@ def _pool_call(payouts) -> dict | None:
     return {"side": side, "pay": pay, "call": side if pay > POOL_MIN_PAY else None}
 
 
-def _mom_call(feat: dict | None) -> str | None:
-    """The "mom" model (pre-registered 2026-10-31): the sign of our exchange-mix price's move over the last 5 s,
-    read at the decision snapshot (~2.9 s before the cutoff).  Why: a 5 s BTC move follows the last few seconds'
-    direction 56-59 % of the time on Binance's own price (48 h of 1 s bars), but bc.game's index agrees with
-    Binance's window move only ~78 %, which leaves ~51-53 % on bc.game's result; on 1,853 logged rounds this signal
-    was 52.6 % [50.3, 54.8] (best of ~15 signals looked at, so it must prove itself forward).  None without it."""
-    v = (feat or {}).get("our_mom5")
-    if not isinstance(v, (int, float)) or v == 0 or (feat or {}).get("error"):
+def _thin_call(feat: dict | None) -> str | None:
+    """The "thin" model (2026-11-11, paper): no prediction.  The game is pari-mutuel, so the side with the smaller
+    pool pays more, and on the log it wins about as often as the other (49.7% of 10,654 rounds).  A flat $1 on the
+    side the page pays at least THIN_MIN_PAY on at the decision returned +14.4% per $1 on 470 bets, paid at the final
+    pools (a fair coin at those payouts: +9.9%; under 2.10 it does not pay: 2.00-2.10 lost 3.9%).  Small flat stakes
+    only: our own stake goes into the thin pool and lowers its payout ($32 into a $105 pool: x2.2 -> x1.9), so a
+    doubling series keeps about a third of the return per $1 (+3 to +4% at a fair coin) and ends 470 bets with a
+    loss about one time in three (flat: 1 in 40).  None when the snapshot has no pools or neither side pays that
+    much, and when the pools in it are not the round's own (pools_prev: the round had no pool frame yet, so
+    _features took the last frame, usually the previous round's).  A record without that key counts as it did."""
+    if not feat or feat.get("pools_prev"):
         return None
-    return "UP" if v > 0 else "DOWN"
+    up, dn = feat.get("pay_up"), feat.get("pay_dn")
+    if not up or not dn or up == dn:
+        return None
+    side, pay = ("UP", up) if up > dn else ("DOWN", dn)
+    return side if pay >= THIN_MIN_PAY else None
 
 
-BOOK_MIN = 0.7     # the "book" model calls only when |Binance 20-level imbalance| is at least this (fixed 2026-10-31)
-# Models chosen by looking at the logged rounds: the go-live gate (and so the real compensate ladder) counts only
-# their rounds AFTER these times (UTC epoch), i.e. their forward record; older models keep their whole record.
-MOMVOL_MIN = 2.8  # "momvol": momentum only when the last 60 s were volatile (vol60 >= this; fixed 2026-11-01)
+def _pool_pay(rec: dict, side: str, stake: float) -> float | None:
+    """What bc.game pays on `side` for `stake` $ of ours: 1 + POOL_FEE_K x other pool / (own pool + stake) at the
+    round's final pools (a paper bet is not in them, so it is added; a real order of ours on that side is, so it
+    is taken out first).  An empty other side pays the stake back (x1.0).  None when the round's pools were not seen
+    or our own side's pool is empty in them."""
+    pools = rec.get("pools")
+    try:
+        if not pools or len(pools) != 2 or not pools[0] >= 0 or not pools[1] >= 0:
+            return None
+        own, other = (pools[0], pools[1]) if side == "UP" else (pools[1], pools[0])
+        lv = rec.get("live") or {}
+        if lv.get("ok") and rec.get("call") == side:
+            own = max(own - (lv.get("stake") or 0.0), 0.0)
+        if not own > 0:
+            return None
+        return 1 + POOL_FEE_K * other / (own + stake)
+    except TypeError:                               # a pool that is not a number: not seen
+        return None
+
+
+# A technical stop in the owner's words: what happened, and what to look at on bc.game before clearing it on the page.
+TECH_STOPS = {
+    "currency": ("the wallet on bc.game changed to another currency while real orders were on",
+                 "that the wallet selected on bc.game is the one you want to bet with"),
+    "unknown": ("bc.game did not confirm an order, so its result is not known",
+                "in the bet history on bc.game whether that order was placed and whether it won"),
+    "rejected": ("bc.game refused several orders within 10 minutes",
+                 "on bc.game that a bet can be placed by hand (balance, wallet, any message on the page)"),
+    "misbooked": ("an order was booked in another round than the one it was sent for",
+                  "that order in the bet history on bc.game"),
+    "mismatch": ("the balance did not move as the order's result said",
+                 "the balance and the last bets in the bet history on bc.game"),
+}
+# The bot's own Hawkes forecast (Bitfinex spot, predictor.py) is pure-Python simulation in a thread: for about 0.7 s
+# it holds the interpreter and this loop gets little time.  Started at the decision, that is exactly when a real order
+# has to go out.  Measured 2026-11-17 on 2,570 rounds with an order-book model calling: the order-book service answers
+# in 0.10 s (asked from outside the bot), but inside the bot the answer was there after 0.38 s (median), 0.75 s (90%),
+# and not within 0.8 s in 5.6% of the rounds; of the first 15 rounds LIVE on XGBoost only 6 got their real order (3 no
+# answer, 1 too late to click, 1 refused by bc.game as closed and the round after it, 2 stale bc.game ticks, 1 the
+# arming round).  So unless this forecast makes the call itself (Gap fade + Hawkes), it starts only this long after
+# the last moment for an order and the late snapshot are over, and is made as of the decision (HawkesPredictor.predict
+# `at`): the logged forecast is the same one, computed later.
+HAWKES_AFTER_S = 0.15
+# The balance is read right before a real order's click.  That read also asked bc.game for its price table whenever
+# the copy was older than 60 s, i.e. in every second round, and the answer takes 0.6-1.6 s: of 34 real attempts on
+# 2026-11-17 five came "too late to click" for it (1.30-1.64 s) and eleven went out 0.6-0.8 s later than they could.
+# The read before a click now uses the table read with the round's preparation (25 s earlier), however old.
+RATE_KEEP_S = 900.0
 REVERT_QUIET_MAX = 1.64   # "revert": a quiet market is vol60 below this (the lowest third, fixed 2026-11-01)
 REVERT_MIN_MOVE = 0.5     # ... and bc.game's own price moved more than this ($) over the last 2 s
 # "overshoot" / "overshoot_book" (fixed 2026-11-01): bc.game's index moved over the last 2 s AND sits ahead of our exchange
 # price in that same direction (dev_tick) - it ran ahead of the market and tends to snap back
 OVERSHOOT_VOL_MAX, OVERSHOOT_MOVE, OVERSHOOT_DEV = 1.92, 0.5, 2.0
 OVERSHOOT_BOOK_MOVE, OVERSHOOT_BOOK_DEV, OVERSHOOT_BOOK_OBI = 0.5, 1.0, 0.5
+FADE_K = 1.0                   # "fade" (fixed 2026-11-10): the same bet from 1 x vol60, about a quarter of all rounds
+FADE_STRICT_K, FADE_VOL_FLOOR = 2.45, 1.25   # "fade_strict" (fixed 2026-11-11): from 2.45 x max(vol60, $1.25), fewer bets
 OVERSHOOT_REL_K = 2.0          # "overshoot_rel" (fixed 2026-11-10): bc.game's gap from the market is at least this x vol60
-JUMP_MIN = 10.0                # "jump" (fixed 2026-11-09): follow our price's 10 s move when it is at least this ($)
 TREES_VOL_LO, TREES_VOL_HI, TREES_EV = 1.38, 2.77, 1.03   # "trees_mid": medium activity only, EV at the snapshot payout
-MODEL_REGISTERED = {"overshoot_rel": 1794322458, "jump": 1794217964, "trees_mid": 1794217964, "gbm": 1793543190, "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105, "overshoot_book": 1793540105, "revert": 1793539811, "momvol": 1793516954, "mom": 1793421420, "book": 1793423220, "bookmom": 1793423400}
-
-
-def _book_call(feat: dict | None) -> str | None:
-    """The "book" model (pre-registered 2026-10-31): bet WITH Binance's 20-level order-book imbalance, only when it
-    is strongly lopsided (|obi20| >= BOOK_MIN), read at the decision snapshot (~2.9 s before the cutoff).  On 2,002
-    logged rounds: 53.4% [50.5, 56.2] on 59% of rounds (in-sample; the contrarian side was 46.6%).  None otherwise."""
-    v = (feat or {}).get("obi20")
-    if not isinstance(v, (int, float)) or abs(v) < BOOK_MIN or (feat or {}).get("error"):
-        return None
-    return "UP" if v > 0 else "DOWN"
-
-
-def _bookmom_call(feat: dict | None) -> str | None:
-    """The "bookmom" model (pre-registered 2026-10-31): bet only when Binance's 20-level book is strongly lopsided
-    (|obi20| >= BOOK_MIN) AND our price moved the same way over the last 5 s; when they disagree, no call (on 2,000
-    logged rounds a buying book with a falling price was a coin flip, 49% UP).  In-sample: 55.4% on 27% of rounds;
-    a 30-feature logistic regression scored 49.4% out of sample on the same data, so the simple rule is used."""
-    b, m = _book_call(feat), _mom_call(feat)
-    return b if b is not None and b == m else None
-
-
-def _momvol_call(feat: dict | None) -> str | None:
-    """The "momvol" model (pre-registered 2026-11-01): momentum, only when the last 60 s were volatile.  Why: about
-    half of all rounds are settled by bc.game moves under $2, where even our 6-exchange price agrees with bc.game only
-    55-69%; momentum was 49.9% in calm minutes and 53.4% [50.8, 56.0] in the most volatile third (in-sample)."""
-    v = (feat or {}).get("vol60")
-    if not isinstance(v, (int, float)) or v < MOMVOL_MIN:
-        return None
-    return _mom_call(feat)
+# Models chosen by looking at the logged rounds: the go-live gate (and so the real compensate ladder) counts only
+# their rounds AFTER these times (UTC epoch), i.e. their forward record; older models keep their whole record.
+# HawkesSign ("sign") reads the order books of the six markets of our price since this time (bcbot/hawkes6.py, run by
+# the order-book service), no longer Bitfinex spot alone.  The owner had its P&L and history started again with it
+# (2026-11-16: "we are doing it from 6 markets again so we need to monitor from the first again"): no round before
+# this time counts for it, in any of its numbers.  The old forecast is still made and logged (rec["pred"]): Gap fade
+# + Hawkes uses it.  On Bitfinex spot it had been 9,579 of 19,007 (50.4%).
+SIGN_SIX_SINCE = 1794843360       # 2026-11-16 15:36 UTC
+# "ob_steady" ("Steady order book", the owner's "the order book has a lifetime", 2026-11-17; obfeat.steady_call):
+# in the bot from this time.  No earlier round has its answer, and none counts for it.
+STEADY_SINCE = 1794961200         # 2026-11-18 00:20 UTC
+MODEL_REGISTERED = {"ob_steady": STEADY_SINCE, "sign": SIGN_SIX_SINCE, "value": 1794796080, "fade_flow2": 1794462784, "fade_hawkes": 1794461209, "fade_flow": 1794460320, "thin": 1794427520, "fade_strict": 1794413954, "fade": 1794340955, "overshoot_rel": 1794322458, "trees_mid": 1794217964,
+                    "ens": 1793543190, "prob": 1793541896, "overshoot": 1793540105,
+                    "overshoot_book": 1793540105, "revert": 1793539811}
+# Removed on 2026-11-11 at the owner's request, after losing at a flat $1 on every call.  The dashboard's record since
+# the last 'P&L -> 0' (2026-11-10 15:26 UTC): mom 49.0% of 3,065 (-$147), mhh 49.5% of 2,985 (-$114), momvol 49.1% of
+# 2,094 (-$97), jump 48.0% of 1,312 (-$89), book 49.1% of 1,646 (-$77), time 50.4% of 2,943 (-$66), bookmom 49.2% of
+# 1,381 (-$62), mhh_hi 48.9% of 814 (-$42), agree 50.8% of 1,439 (-$21).  Their forward records (since each was fixed)
+# say the same: 48.4-51.0% on 1,505-13,882 calls each, -$30 to -$558.  Betting against them is no better (49-52%):
+# the trend, the order book and the order flow carry no signal here either way.  Their code is in git before this change.
+# HawkesTime's forecast (pred.exp_ret / time_call, rec["z"]) is still computed in predictor.py and logged with every
+# round; only its score is gone (dropping the computation would change HawkesSign's share of the time budget).
+# "gbm" (P(UP) trees) was removed on 2026-11-16 at the owner's request: it hardly ever bet (5 bets since the last
+# 'P&L -> 0', 99 since it was fixed on 2026-11-01, 56.6% of them right: too few to tell anything).  Its P(UP) is
+# still computed and logged with every round (prob_gbm): the ensemble ("ens") is the average of it and the logistic.
+REMOVED_MODELS = ("mom", "momvol", "jump", "book", "bookmom", "mhh", "mhh_hi", "agree", "time", "gbm")
 
 
 def _revert_call(feat: dict | None) -> str | None:
@@ -323,7 +380,7 @@ def _overshoot_call(feat: dict | None, with_book: bool = False) -> str | None:
     return "DOWN" if m > 0 else "UP"
 
 
-def _overshoot_rel_call(feat: dict | None) -> str | None:
+def _overshoot_rel_call(feat: dict | None, k: float = OVERSHOOT_REL_K, key: str = "dev_tick") -> str | None:
     """The "overshoot_rel" model (pre-registered 2026-11-10): the snap-back with no fixed $ thresholds.  Bet against
     bc.game's gap from our exchange price (dev_tick) when it is at least OVERSHOOT_REL_K times the last minute's
     volatility (vol60), in any market.  Why: Overshoot's $ thresholds (vol60 < 1.92, gap > $2) made no call in 370
@@ -331,23 +388,153 @@ def _overshoot_rel_call(feat: dict | None) -> str | None:
     58% of 732 (multipliers 1.5 / 2.5 / 3 gave 55-58% on both parts), about 2.6 times Overshoot's calls.  The
     multiplier was looked at on the whole log, so only the forward record counts.  None otherwise."""
     f = feat or {}
-    d, v = f.get("dev_tick"), f.get("vol60")
+    d, v = f.get(key), f.get("vol60")
     if f.get("error") or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (d, v)):
         return None
-    if v <= 0 or d == 0 or abs(d) < OVERSHOOT_REL_K * v:
+    if v <= 0 or d == 0 or abs(d) < k * v:
         return None
     return "DOWN" if d > 0 else "UP"
 
 
-def _jump_call(feat: dict | None) -> str | None:
-    """The "jump" model (pre-registered 2026-11-09): bet that a big move continues.  Our price moved $10 or more over
-    the last 10 s, in any market.  First 60% of 7,242 logged rounds 53.8% of 1,140, last 40% 53.4% of 485 (+4.1% per $
-    at the final payout); larger jumps were no better ($30+: 40% of 30 on the last 40%).  None otherwise."""
+def _fade_call(feat: dict | None) -> str | None:
+    """The "fade" model (pre-registered 2026-11-10): overshoot_rel from FADE_K = 1 x vol60, so that the bot calls in
+    about a quarter of all rounds instead of once in hours.  On 8,876 logged rounds, by day (10-30 .. 11-10): 51.9%
+    of 243, 54.9% of 1,438, 52.7% of 1,564, 59.3% of 361, 53.8% of 91, 54.5% of 134: 54.3% of 3,831 in all, against
+    a break-even of 51.55%.  The multiplier was looked at on the whole log (0.75 and 1.25 give the same picture), and
+    the edge is thin: only the forward record counts.  No extra condition (book, quiet / busy, bc.game's last move,
+    the late snapshot) was better on both halves."""
+    return _overshoot_rel_call(feat, FADE_K)
+
+
+def _fade_fair_call(feat: dict | None) -> str | None:
+    """The "fade_fair" model (2026-11-11, paper): the Gap fade's own rule (the gap is at least FADE_K x vol60, bet
+    against it) with the gap measured against the separate new price (dev_fair) instead of our price (dev_tick).
+    The two run side by side on the same rounds, so their records say whether the new price is the better one.
+    None while there is no new price (bcbot/fair_price.json absent) or it had no value at the snapshot."""
+    return _overshoot_rel_call(feat, FADE_K, "dev_fair")
+
+
+def _fade_strict_call(feat: dict | None) -> str | None:
+    """The "fade_strict" model (pre-registered 2026-11-11): the Gap fade's bet, only when the gap is at least
+    FADE_STRICT_K = 2.45 times max(vol60, $1.25).  It is what was left of a search for a model that bets often and
+    rarely loses 5-6 times in a row: four independent searches (fitted models, bc.game's price mechanics, losing
+    runs, agreement of signals and payouts; 2,218 variants, everything chosen on 10-30 .. 11-01, each result re-run by
+    a second reviewer) produced 12 candidates and none beat the plain Gap fade on the later days (11-02, 11-09 ..
+    11-11).  The gap is the only input with signal; losses are independent (after 3 / 4 / 5 losses in a row the next
+    bet wins 48 / 60 / 53%), so no pause rule shortens the runs: only a higher win rate on the bets taken does, and
+    the gap's size is the one thing that raises it.  This rule: 61.2% of 719 on the first three days, 56.9% of 253
+    (6% of rounds) on the later four, 95% range 50.4-63.2%: about 180 bets a day and a run of 6 losses 3.6 times per
+    1,000 bets (Gap fade: 5.3), i.e. still about one every day and a half.  The $1.25 floor (in a quiet market a
+    "2 x volatility" gap is under $2 and won 50%) did not bind on the later days, so it is untested out of sample;
+    there the rule equals the plain fade at 2.45 x.  Only the forward record counts."""
     f = feat or {}
-    m = f.get("our_mom10")
-    if f.get("error") or not isinstance(m, (int, float)) or abs(m) < JUMP_MIN:
+    d, v = f.get("dev_tick"), f.get("vol60")
+    if f.get("error") or not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (d, v)):
         return None
-    return "UP" if m > 0 else "DOWN"
+    if v <= 0 or d == 0 or abs(d) < FADE_STRICT_K * max(v, FADE_VOL_FLOOR):
+        return None
+    return "DOWN" if d > 0 else "UP"
+
+
+FADE_FLOW_KEYS = ("ofi_binance_perp_3s", "ofi_okx_perp_3s", "ofi_bybit_perp_3s")
+
+
+def _fade_flow_call(feat: dict | None) -> str | None:
+    """The "fade_flow" model (2026-11-12, paper; the owner's idea: bet only when a second opinion says the same
+    side).  The Gap fade's bet, placed only when at least 2 of the 3 perpetual futures (Binance, OKX, Bybit) had
+    order flow on the bet's side over the last 3 s.  29 second opinions were measured on the Gap fade's 5,250 logged
+    bets: HawkesSign, the P(UP) models, the trend and the order book moved its win rate by a point or less; the
+    futures' order flow was the only one that did.  With this rule: 55.7% of 1,952 bets (+8.4% per $1 at the final
+    pools) against 52.1% of the 3,298 it leaves out (first half of the log 56.2 / 52.5, second half 55.0 / 51.8;
+    better on 5 of 7 days).  It keeps about 37% of the bets and does NOT make losing runs rare: 9.7 runs of 5+ per
+    1,000 bets (Gap fade 11.4).  Picked after looking at 29 candidates, so only its forward record counts."""
+    side = _fade_call(feat)
+    if not side:
+        return None
+    votes = [("UP" if v > 0 else "DOWN") for k in FADE_FLOW_KEYS
+             if isinstance(v := feat.get(k), (int, float)) and not isinstance(v, bool) and v == v and v != 0]
+    return side if sum(x == side for x in votes) >= 2 else None
+
+
+FADE_FLOW2_K = 2.0             # "fade_flow2": the gap is at least this x vol60 (as overshoot_rel) AND the flow agrees
+
+
+def _fade_flow2_call(feat: dict | None) -> str | None:
+    """The "fade_flow2" model (2026-11-12, paper): the Gap fade's bet with BOTH things that raise its win rate on
+    the log: the gap is at least FADE_FLOW2_K = 2 x vol60, and at least 2 of the 3 futures had order flow on the
+    bet's side (_fade_flow_call).  Asked for as a way to make long losing runs rarer.  Losses are independent, so runs
+    per day = bets per day x p x (1 - p)^k: only a higher win rate and fewer bets lower them.  On the log: 57.6% of
+    802 bets (older days 57.7% of 709, recent days 57.0% of 93), +12.1% per $1 at the final pools, about 230 bets on a
+    full day, and so about 1.8 runs of five losses and 0.8 runs of six a day, against 15 and 7 for the plain Gap
+    fade (seen on the log: 6 and 2 in 802 bets, the longest 6).  Runs do not vanish: at 58% six in a row still comes
+    every day or two.  A fitted score on the same inputs did not hold from one part of the log to the other, so the
+    rule is kept this simple.  Thresholds picked after looking at 18 such rules: only its forward record counts."""
+    side = _fade_flow_call(feat)
+    if not side:
+        return None
+    return side if abs(feat["dev_tick"]) >= FADE_FLOW2_K * feat["vol60"] else None
+
+
+# "value" (2026-11-15, paper): the chance of each side times what the page pays on it.  Fitted on the rounds up to
+# 2026-11-11 20:05 UTC (10,780 rounds): the gap counts only beyond 1 x vol60 (under it the bet against the gap wins
+# 49-51%) and up to 4 x; the bigger pool wins a little more often than the smaller one.
+VALUE_GAP_LO, VALUE_GAP_HI = 1.0, 4.0
+VALUE_W_GAP, VALUE_W_POOL = 0.1154, 0.0831
+VALUE_MIN_EV = 0.05            # bet when chance x payout - 1 is at least this
+VALUE_FITTED_UNTIL = 1794427520   # 2026-11-11 20:05 UTC: the end of the rounds it was fitted on.  Its record on the
+#                                   page counts from MODEL_REGISTERED["value"] = 2026-11-16 02:28 UTC, when it went into
+#                                   the bot: the 817 bets in between were its test on the log, not bets the bot made
+POOL_BOOKED = ("thin", "value")   # models whose bet is about the payout: booked from the round's final pools (_pool_pay)
+
+
+def _value_read(feat: dict | None) -> tuple | None:
+    """(side, its chance, its expected return per $1) for the better of the two sides at the decision, or None when
+    the gap, the volatility or the round's own pools are not known (pools_prev: see _thin_call).  The chance of UP is
+    a logistic of two inputs and no constant (UP and DOWN are symmetric): the part of bc.game's gap from the market
+    beyond 1 x vol60 (against the gap, as the Gap fade bets) and the log of the pools' ratio, read from the payouts."""
+    f = feat or {}
+    if f.get("error") or f.get("pools_prev"):
+        return None
+    vals = [f.get(k) for k in ("dev_tick", "vol60", "pay_up", "pay_dn")]
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and x == x for x in vals):
+        return None
+    d, v, up, dn = vals
+    if v <= 0 or up <= 1 or dn <= 1:
+        return None
+    g = d / v
+    beyond = math.copysign(max(0.0, min(abs(g), VALUE_GAP_HI) - VALUE_GAP_LO), g)
+    pools = 0.5 * math.log((dn - 1) / (up - 1))            # log(UP pool / DOWN pool): pay_up - 1 = PAY_K x dn / up
+    p_up = 1 / (1 + math.exp(VALUE_W_GAP * beyond - VALUE_W_POOL * pools))
+    ev_up, ev_dn = p_up * up - 1, (1 - p_up) * dn - 1
+    return ("UP", p_up, ev_up) if ev_up >= ev_dn else ("DOWN", 1 - p_up, ev_dn)
+
+
+def _value_call(feat: dict | None) -> str | None:
+    """The "value" model (2026-11-15, paper): bet the side whose chance x payout is at least 1 + VALUE_MIN_EV.
+
+    Why: on 14,895 logged rounds only two things made money at a flat $1 paid at the final pools: the gap (the bet
+    against it wins 53-58% from 1.5 x vol60 up) and the payout (the smaller pool wins as often and pays more).  The
+    trend, the order book and the order flow did not (CLAUDE.md).  This rule puts both on one scale, so a small gap
+    is enough on a side that pays 2.05 and a big gap is needed on a side that pays 1.85.  With nothing but the payout
+    it bets from x2.12; with a gap of 2 / 3 / 4 x vol60 from x1.99 / x1.88 / x1.79.
+
+    How it was chosen: four shapes for the chance x seven thresholds, each fitted on the days before and scored on
+    the day, inside the rounds up to 2026-11-11 20:05 UTC only; this shape at 5% had the largest profit / sqrt(bets)
+    there (1,391 bets, +$142.72).  Then one look at the 4,115 rounds after it (to 11-13 06:38 UTC, about 35 h):
+    817 bets, 23 an hour, 51.7% won, +$73.84 = +9.0% per $1 (11-11 +$13.93, 11-12 +$57.15, 11-13 +$2.75; on the same
+    rounds Thin side +$43.84, the Gap fade from 2 x +$37.01, the Gap fade +$19.18).  All 28 shape / threshold pairs
+    were positive there (+3% to +15% per $1), so the choice of pair is not what carries it.
+
+    What it is not: safe.  It wins about half its bets, so it has losing runs (about 3 runs of six a day, the longest
+    on the log 9; worst drop at a flat $1: $24), and a bigger stake fills the pool it bets into (flat $1 +9.0% per
+    $1, $5 +6.9%, $10 +4.4% on the later rounds).  A bigger flat stake did better than a series at the same worst
+    drop (all rounds: flat $2 +$502, drop $49; x1.5 giving up after 5 +$374, drop $51; x2 after 6 +$423, drop $207).
+    Its record on the page counts the rounds since it went into the bot (2026-11-16 02:28 UTC).  The 817 bets on the
+    log between the end of its fit and that time were its test (not fitted or chosen on, but seen once before the rule
+    was put in the bot); since 2026-11-16 the page no longer shows them as its bets (the owner read them as bets the
+    bot had made).  It is paid x2.0-2.1 on average, so break-even is 47-50% wins: judge it by its P&L."""
+    r = _value_read(feat)
+    return r[0] if r and r[2] >= VALUE_MIN_EV else None
 
 
 UD_SIGNED = ("dev", "dev_1s", "dev_3s", "dev_chg1", "dev_mean60", "dev_tick", "dev_z60", "tick_chg", "bc_mom05", "bc_mom1",
@@ -418,6 +605,57 @@ def _sign_call(pred: dict) -> str | None:
     return "UP" if p > 0.5 else "DOWN" if p < 0.5 else None
 
 
+def _fade_hawkes_call(feat: dict | None, pred: dict | None) -> str | None:
+    """The "fade_hawkes" model (2026-11-12, paper; the owner's rule): the Gap fade's bet, placed only when
+    HawkesSign's forecast (the order-book model) is on the same side.  On the log HawkesSign's agreement did NOT
+    change the Gap fade's win rate: 53.8% of 2,463 bets when it agreed, 53.1% of 2,435 when it did not (recent days
+    50.9% when it agreed), so this model is here to be watched side by side, not because the log supports it.  About
+    half of the Gap fade's bets.  None while the Hawkes models are warming up (about 5 min after every start)."""
+    side = _fade_call(feat)
+    if not side or not pred:
+        return None
+    return side if _sign_call(pred) == side else None
+
+
+OB_LIFE_EVERY_S = 1.0          # the order-book card asks the service for the books' reading this often (GET /life)
+OB_LIFE_STALE_S = 3.5          # ... and says "no reading" when the last answer is older than this
+OB_LIFE_SHOW_S = 120.0         # the card's small graph: the reading over this long
+
+
+def _is_num(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x
+
+
+def _reading_text(r: float, age: float) -> str:
+    """A reading on the order-book card: "78% UP for 7.2 s" (the share of the best-price size on the side it is on;
+    an age is counted up to LIFE_CAP_S)."""
+    side = " UP" if r > 0 else " DOWN" if r < 0 else ""
+    return f"{50 + 50 * abs(r):.0f}%{side} for " + (f"{LIFE_CAP_S:.0f} s+" if age >= LIFE_CAP_S else f"{age:.1f} s")
+
+
+def _steady_text(life: dict | None) -> str:
+    """What the five markets' best prices show, in words: "the books 78% UP for 7.2 s"."""
+    r, age = (life or {}).get("r"), (life or {}).get("age")
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and x == x for x in (r, age)):
+        return "the books' reading is not known"
+    return f"the books {50 + 50 * abs(r):.0f}% {'UP' if r > 0 else 'DOWN'} for {age:.1f} s"
+
+
+def _running(ts, ps, max_pts: int) -> dict:
+    """Bets one by one (times, P&L of each) as a running total for a graph: the times and the totals (at most about
+    max_pts of them, the last one always), how many bets, how many won, and their sum.  Added up as the Models
+    table adds a row up (rounded to 4 places at every bet), so the sum of a whole row is the row's P&L."""
+    acc, won, tot = 0.0, 0, []
+    for p in ps:
+        acc = round(acc + p, 4)
+        won += p > 0
+        tot.append(acc)
+    n = len(tot)
+    keep = range(n) if n <= max_pts else sorted({*range(0, n, -(-n // max_pts)), n - 1})
+    return {"t": [round(ts[k], 1) for k in keep], "v": [round(tot[k], 2) for k in keep],
+            "n": n, "won": int(won), "pnl": acc}
+
+
 def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson 95% interval of a win rate k/n (0..1), (0, 1) without data."""
     if n <= 0:
@@ -430,16 +668,21 @@ def _wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 class AutoTrader:
-    # every model is scored on every round; only CALLERS may make the calls.  HawkesTime equals -sign(BI) in 92%
-    # of rounds and scores 48.5%, so it is scored but never calls.  "agree": bet only when HawkesSign and MHH call
-    # the same side, skip the round otherwise
-    MODELS = {"time": "HawkesTime", "sign": "HawkesSign", "mhh": "MHH flow", "agree": "Sign + MHH agree",
-              "mom": "Momentum 5s", "book": "Strong book", "bookmom": "Book + trend", "momvol": "Momentum, volatile only",
-              "revert": "Quiet reversal", "overshoot": "Overshoot", "overshoot_book": "Overshoot + book",
-              "prob": "P(UP) model", "gbm": "P(UP) trees", "ens": "P(UP) ensemble", "jump": "Jump follow",
-              "trees_mid": "Trees, medium market", "overshoot_rel": "Overshoot, scaled"}
-    CALLERS = ("sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book",
-               "prob", "gbm", "ens", "jump", "trees_mid", "overshoot_rel")
+    # every model is scored on every round and any of them may make the calls (the "pool" rule is scored only:
+    # _model_calls).  The models removed on 2026-11-11 and 2026-11-16 are listed at REMOVED_MODELS
+    MODELS = {"sign": "HawkesSign", "revert": "Quiet reversal", "overshoot": "Overshoot",
+              "overshoot_book": "Overshoot + book", "prob": "P(UP) model",
+              "ens": "P(UP) ensemble", "trees_mid": "Trees, medium market", "overshoot_rel": "Overshoot, scaled",
+              "fade": "Gap fade", "fade_strict": "Gap fade, strict", "fade_fair": "Gap fade, new price",
+              "thin": "Thin side", "fade_flow": "Gap fade + flow",
+              "fade_hawkes": "Gap fade + Hawkes", "fade_flow2": "Gap fade + flow, 2x", "value": "Value bet",
+              # the order-book models (obfeat.OB_MODELS): their P(UP) comes from the order-book service at the
+              # decision (_ob_fetch).  Selectable since 2026-11-16: the owner looked for them in the Model list
+              "ob_logit": "Logistic regression (order books)", "ob_lgbm": "LightGBM (order books)",
+              "ob_xgb": "XGBoost (order books)", "ob_deeplob": "DeepLOB (order books)",
+              # follow the five markets' best-price reading when it is strong and 5 s or older (obfeat.steady_call)
+              "ob_steady": "Steady order book"}
+    CALLERS = tuple(MODELS)
     STATES = ("DISARMED", "ARMED", "STOPPED")
     BREAK_EVEN = 0.5155             # 1 / 1.94: the win rate at which a flat bet breaks even (before pool dilution)
     GATE_MIN_N = 3000               # calls a model must have before its record can open the gate at all
@@ -449,18 +692,49 @@ class AutoTrader:
         self.trader, self.cfg = trader, cfg
         self.feed = LobFeed()
         self.pred = HawkesPredictor(self.feed)
-        self.flow = BinanceFlow()                         # the MHH bot's model: Binance order flow -> P(UP)
+        self.flow = BinanceFlow()                         # Binance 1 s klines + best bid/ask: the taker-flow inputs
         self.book = BinanceBook()                         # Binance top-20 book imbalance, for the panel's OB card
-        self.flow_model = FlowLogit(cfg.flow_model)
         self.bc_ticks: deque = deque(maxlen=3000)         # (server s, bc.game BTC price) from the page's feed
         self.clock = BcClock()                            # bc.game's clock, from those ticks (clock.py)
         self.pools: dict = {}                             # latest Up / Down pool frame
         self.runs: dict = {}                              # per model: its losing runs by length (see _run_step)
+        # the order-book models: P(UP) from the order-book service at each decision (_ob_fetch)
+        self.ob_v = 0                                     # the fitted version their records count (_ob_roll)
+        self.ob_call_v = 0                                # the fit that made the calls last (when one of them calls)
+        self.ob_info: dict = {}                           # what the service last said, for the dashboard
+        self._ob_http = None
+        # the order-book card: the five markets' reading right now, asked once a second (_ob_life_loop); shown only
+        self.ob_life: dict = {}                           # {at, r, age, per: {market: its own reading}}
+        self.ob_life_hist: deque = deque(maxlen=int(OB_LIFE_SHOW_S / OB_LIFE_EVERY_S) + 10)     # (time, reading)
+        self._life_http = None
         self.runs_today: dict = {}                        # the same, only rounds since local midnight
         self._runs_day0 = 0.0
+        self.runs_days: dict = {}                         # earlier days: {date: {model: {longest, bets, current}}}
+        # the page's P&L graph (pnl_curve): each model's paper bets one by one, the amounts its row in the Models
+        # table adds up, and every settled real order
+        self.curves: dict = {}                            # per model: (times, P&L of each bet), two arrays
+        self.real_pts: list = []                          # (time, P&L in $) of every settled real order
         # our estimate of bc.game's price: a weighted, delayed mix of exchange prices (ourprice.py)
         self.ex_feeds = make_feeds()
         self.our = OurPrice(self.ex_feeds, self.bc_ticks)
+        # the separate new price (bcbot/ourprice.py, FAIR_FILE): its own recipe and, where the recipe names an exchange
+        # our price does not use, its own feed.  Nothing above or below reads it except _fade_fair_call.  It keeps
+        # time by our price's clock (the recording its recipe is fitted on does too)
+        self.fair_recipe, self.fair_problem = read_fair_recipe()      # fair_problem: why a file was refused (the page)
+        self.fair: OurPrice | None = None
+        self.fair_feeds: dict = {}
+        self.fair_v = 0
+        self.fair_id = 0                                  # a fingerprint of the loaded recipe (0: none), kept with an arming
+        self._fair_warned = False
+        if self.fair_recipe:
+            mix = self.fair_recipe["mix"]
+            self.fair_feeds = {k: self.ex_feeds[k] if k in self.ex_feeds else make_feeds([k])[k] for k in mix}
+            self.fair = OurPrice(self.fair_feeds, self.bc_ticks, mix=mix, gap_window=self.fair_recipe["level_window"],
+                                 clock=self.our.clock)
+            self.fair_v = self.fair_recipe["version"]
+            self.fair_id = zlib.crc32(json.dumps([self.fair_recipe["registered"], self.fair_recipe["level_window"],
+                                                  sorted(mix.items())]).encode()) or 1
+            MODEL_REGISTERED["fade_fair"] = self.fair_recipe["registered"]     # its record counts from the recipe's time
         self.prob = ProbModel(cfg.auto_log)               # P(UP) from the logged rounds (bcbot/prob.py)
         self._prob_task = None
         self.on = False
@@ -516,21 +790,31 @@ class AutoTrader:
         # chosen at runtime (dashboard / API / terminal), kept in logs/auto_settings.json
         self.model, self.progression = cfg.auto_model, cfg.auto_progression
         self.since = 0.0                                  # the ladder test counts rounds from this time (last switch)
+        self.limits_set: dict = {}                        # the real-money limits the operator set on the page (LIMITS)
         self._settings_path = cfg.auto_log.with_name("auto_settings.json")
+        self.model_replaced: str | None = None            # the chosen model no longer exists (see _check_start)
+        self._start_checked = False                       # _check_start has run (the saved state is dealt with)
         try:
             saved = json.loads(self._settings_path.read_text(encoding="utf-8"))
             self.model = saved.get("model", self.model)
+            self.model_replaced = saved.get("model_replaced") or None     # a fallback an earlier start did not finish
             self.progression = float(saved.get("progression", self.progression))
             self.since = float(saved.get("since", 0.0))
             self.stats_since = float(saved.get("stats_since", 0.0))
+            for key, (_, typ, lo, hi) in self.LIMITS.items():     # the limits set from the page beat .env
+                if saved.get(key) and lo <= typ(saved[key]) <= hi:
+                    self.limits_set[key] = typ(saved[key])
+            self._apply_limits()
+            cfg = self.cfg
         except (OSError, ValueError):
             pass
         if self.model not in self.CALLERS:
-            log.warning("%s can't make the calls (scored only); calls by HawkesSign", self.MODELS.get(self.model, self.model))
-            self.model = "sign"
+            log.warning("model %r %s; calls by HawkesSign until another model is chosen", self.model,
+                        "was removed on 2026-11-11" if self.model in REMOVED_MODELS else "can't make the calls")
+            self.model_replaced, self.model = self.model, "sign"
         # paper P&L if each model's stakes followed the progression (like the MHH dashboard's ladder P&L)
         self.ladders = {m: {"pnl": 0.0, "staked": 0.0, "biggest": 0.0, "step": 0}
-                        for m in ("time", "sign", "mhh", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid", "overshoot_rel")}
+                        for m in self.MODELS}
 
     # ---------- runtime settings ----------
 
@@ -546,7 +830,10 @@ class AutoTrader:
     def _save_settings(self) -> None:
         self._settings_path.parent.mkdir(parents=True, exist_ok=True)
         self._settings_path.write_text(json.dumps({"model": self.model, "progression": self.progression,
-                                                   "since": self.since, "stats_since": self.stats_since}),
+                                                   "since": self.since, "stats_since": self.stats_since,
+                                                   **({"model_replaced": self.model_replaced}      # until the start
+                                                      if self.model_replaced and not self._start_checked else {}),
+                                                   **self.limits_set}),                           # check has run
                                        encoding="utf-8")
 
     @staticmethod
@@ -564,7 +851,8 @@ class AutoTrader:
         fwd = {k: v for k, v in self.stats.items() if "_fwd_" in k}
         self.stats = {**self._new_stats(), **fwd}
         self.stats_since = time.time()
-        self.runs, self.runs_today = {}, {}
+        self.runs = {}                             # (today's runs and the earlier days' longest stay: calendar days)
+        self.curves = {}                           # the graph's paper lines are the rows' bets (the real orders stay)
         self.recent.clear()
         self.settled.clear()
         self.call_streak = 0
@@ -583,7 +871,7 @@ class AutoTrader:
     def set_model(self, name: str) -> None:
         name = name.strip().lower()
         if name not in self.CALLERS:
-            raise TradeError(f"model must be one of {', '.join(self.CALLERS)} (HawkesTime is scored but can't call)")
+            raise TradeError(f"model must be one of {', '.join(self.CALLERS)}")
         if self.armed:
             raise TradeError("disarm first ('live off'): the calling model can't change while real orders are on")
         if name != self.model:
@@ -592,25 +880,49 @@ class AutoTrader:
         self.model = name
         self._save_settings()
 
-    def set_progression(self, x: float) -> None:
-        """The paper ladders' progression.  Real orders are always the flat base stake."""
+    def set_progression(self, x: float, who: str = "operator") -> None:
+        """The stake rule after a loss: 1 = flat, 2 = double.  Since 2026-11-10 (the owner's decision) real orders
+        follow it like the paper bets: base x progression for each real loss in a row, back to the base after a
+        win, for as many losses in a row as the losses-in-a-row stop allows (stake(), _real_ladder()).
+        Since 2026-11-12 (the owner's decision) it can be changed while real orders are on: the next real stake then
+        follows the new rule at the present run of real losses (x2 chosen at 3 losses in a row makes it $8; Flat makes
+        it $1), the change is written to the events file, and an amount already typed for the round being prepared
+        is typed again."""
         if not 1.0 <= x <= 3.0:
             raise TradeError("progression must be between 1 (flat) and 3")
-        if x != self.progression:
-            log.warning("Paper ladders: stake x%g after a loss (was x%g). Real orders stay flat $%g.", x,
-                        self.progression, self.cfg.auto_stake_usd)
+        changed, was = x != self.progression, self.progression
+        before = self.stake() if self.armed else None
+        if changed:
+            log.warning("Stake x%g after a loss (was x%g), on paper and for real orders.", x, self.progression)
             self._restart_test()
         self.progression = x
+        self._sync_trader_cap()
         self._save_settings()
+        if changed and self.armed:                 # real orders are on: say what the next one will be, and log it
+            self._event("stake_rule", who=who, was=was, now=x, stake=self.stake(),
+                        stakes=[v * self.cfg.auto_stake_usd for v in self._real_ladder()] if self.ladder_on() else None)
+            log.warning("Real orders are ON: the next real stake is now $%g (real losses in a row: %d).",
+                        self.stake(), self.real_run)
+            try:
+                if self._prepared_rid and self.stake() != before:
+                    asyncio.get_running_loop().create_task(self._prepare(self._prepared_rid))
+            except RuntimeError:                   # no event loop (a test)
+                pass
 
     # ---------- start / stop ----------
+
+    def restore_history(self) -> None:
+        """Restore saved records once, even when the site has not connected yet."""
+        if not getattr(self, "_history_loaded", False):
+            self._load_state()
+            self._load_log()
+            self._check_start()
+            self._history_loaded = True
 
     async def start(self) -> None:
         """Start the order-book feed and the round loop (once); listen to the page's round feed."""
         if not self._tasks:
-            self._load_state()
-            self._load_log()
-            self._check_start()
+            self.restore_history()
             self._prob_task = asyncio.ensure_future(asyncio.to_thread(self.prob.fit))
             await self.trader.ensure_ready()
             await self._attach(self.trader.page)
@@ -618,10 +930,13 @@ class AutoTrader:
             self._tasks = [asyncio.create_task(self.feed.run()), asyncio.create_task(self.flow.run()),
                            asyncio.create_task(self._loop())]
             self._tasks += [asyncio.create_task(f.run()) for f in self.ex_feeds.values()]
+            self._tasks += [asyncio.create_task(f.run()) for k, f in self.fair_feeds.items() if k not in self.ex_feeds]
             self._tasks.append(asyncio.create_task(self.book.run()))
+            if self.cfg.auto_ob_url:                                     # the order-book card's reading
+                self._tasks.append(asyncio.create_task(self._ob_life_loop()))
         self.on = True
-        log.info("Auto ON (calls by %s, paper; real orders %s). Hawkes models need ~5 min of order-book data, the "
-                 "MHH flow model ~31 s of Binance seconds.", self.model, self.state.lower())
+        log.info("Auto ON (calls by %s, paper; real orders %s). The Hawkes models need ~5 min of order-book data.",
+                 self.model, self.state.lower())
 
     def stop(self) -> None:
         self.on = False
@@ -644,12 +959,14 @@ class AutoTrader:
         return self.cfg.auto_daily_loss_usd + self.day_live_pnl
 
     def bc_now(self) -> float:
-        """Now on bc.game's clock (from its ticks); the exchanges' clock while the tick clock is not ok."""
-        t = self.clock.now() if self.clock.ok() else None
+        """Now on bc.game's clock (from its ticks); the exchanges' clock while the tick clock cannot be used (too
+        few ticks in the last minute, none in the last 20 s, or its medians disagree).  A tick that is a second or
+        two late does not change the clock: its offset is a median over the last minute."""
+        t = self.clock.now() if self.clock.usable() else None
         return t if t is not None else self.our.server_now()
 
     def clock_src(self) -> str:
-        return "bc" if self.clock.ok() else "exchange"
+        return "bc" if self.clock.usable() else "exchange"
 
     # ---------- real money: arm / disarm / stop ----------
 
@@ -670,7 +987,8 @@ class AutoTrader:
     def _save_state(self) -> None:
         """The real-loss counter and the campaign, kept across restarts (the log is the source; this is a check)."""
         data = {"real_run": self.real_run, "updated": time.time(), "campaign_since": self.campaign_since,
-                "campaign_pnl": round(self.campaign_pnl, 4), "state": self.state, "stop_reason": self.stop_reason,
+                "campaign_pnl": round(self.campaign_pnl, 4), "state": self.state, "model": self.model,
+                "fair_v": self.fair_v, "fair_id": self.fair_id, "stop_reason": self.stop_reason,
                 "armed_at": self.armed_at, "ladder_forced": self.ladder_forced, "arm_live_pnl": round(self.arm_live_pnl, 4),
                 "arm_orders": self.arm_orders, "rearm_grant": self.rearm_grant,
                 "tech_stop": self.tech_stop, "stopped_at": self.stopped_at, "rearms": self.rearms,
@@ -699,13 +1017,31 @@ class AutoTrader:
         self._saved_state = st
         self.campaign_since = float(st.get("campaign_since") or 0.0)
         self.stop_reason, self.tech_stop = st.get("stop_reason"), st.get("tech_stop")
+        if self.tech_stop and not self.stop_reason:     # lost when Paper was pressed after the stop (until 2026-11-17)
+            self.stop_reason = self._stop_reason_from_events()
         self.stopped_at, self.rearms = float(st.get("stopped_at") or 0.0), int(st.get("rearms") or 0)
         self.run_reset_at = float(st.get("run_reset_at") or 0.0)
         self.unknown, self.cleared = list(st.get("unknown") or []), list(st.get("cleared") or [])
 
+    def _stop_reason_from_events(self) -> str | None:
+        """Why the technical stop in force was made: the last 'stop' of its kind in the audit trail."""
+        try:
+            lines = self.cfg.auto_events.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("event") == "stop" and e.get("tech") == self.tech_stop:
+                return e.get("reason") or None
+        return None
+
     def _check_start(self) -> None:
-        """After the log is replayed: compare the rebuilt counter with the saved one, and set the start state
-        (never ARMED: every start is disarmed; STOPPED when the run limit or a technical stop is still in force)."""
+        """After the log is replayed: compare the rebuilt counter with the saved one, and set the start state:
+        STOPPED when the run limit or a technical stop is still in force; ARMED again only when a saved arming is
+        resumed (AUTO_RESUME_ARM, inside its time limit, the same calling model); else DISARMED."""
         saved = getattr(self, "_saved_state", {}).get("real_run")
         if saved is not None and int(saved) != self.real_run:
             log.warning("real losses in a row: %d from the log, %d in the state file; keeping the larger",
@@ -726,8 +1062,28 @@ class AutoTrader:
             self.state, self.stop_reason = "DISARMED", None
             saved = getattr(self, "_saved_state", {}) or {}
             armed_at = float(saved.get("armed_at") or saved.get("updated") or 0)
-            if (saved.get("state") == "ARMED" and self.cfg.auto_resume_arm
-                    and time.time() - armed_at < self.cfg.auto_arm_ttl_h * 3600):
+            would_resume = (saved.get("state") == "ARMED" and self.cfg.auto_resume_arm
+                            and (not self.cfg.auto_arm_ttl_h                       # 0: no time limit
+                                 or time.time() - armed_at < self.cfg.auto_arm_ttl_h * 3600))
+            # ... but only with the model that was armed: real orders by a model the owner did not choose must not
+            # start.  The state file names the armed model; one written before 2026-11-11 does not, and then a model
+            # that had to be replaced at this start (it was removed) is the sign.
+            armed_model = saved.get("model")
+            same_model = armed_model == self.model if armed_model else not self.model_replaced
+            was, now_by = armed_model or self.model_replaced, self.model
+            # the new price's model is its recipe (a refit starts its record again): armed on one recipe, it does not
+            # go on with another one, or with none.  The fingerprint catches a file changed under the same version
+            if same_model and self.model == "fade_fair" and (not self.fair_v or saved.get("fair_v") != self.fair_v
+                                                             or saved.get("fair_id") != self.fair_id):
+                same_model = False
+                was = f"fade_fair, recipe {saved.get('fair_v') or 'none'}"
+                now_by = f"fade_fair, recipe {self.fair_v or 'none'}" + (
+                    " (the file is not the one armed)" if self.fair_v and saved.get("fair_v") == self.fair_v else "")
+            if would_resume and not same_model:
+                self._event("disarm", who="restart", reason=f"the calling model changed ({was} -> {now_by})")
+                log.warning("Real orders NOT resumed after the restart: they were armed with %r and the calls are now "
+                            "made by %r. Switch to LIVE again if that is what you want.", was, now_by)
+            elif would_resume:
                 self.state, self.armed_at = "ARMED", armed_at          # the arming goes on across the restart
                 self.ladder_forced = bool(saved.get("ladder_forced"))
                 self.rearm_grant = bool(saved.get("rearm_grant"))
@@ -739,6 +1095,12 @@ class AutoTrader:
                 log.warning("Real orders ARMED again after the restart (AUTO_RESUME_ARM=1; armed at %s, ladder %s)",
                             time.strftime("%H:%M", time.localtime(armed_at)), "on" if self.ladder_on() else "off")
         self._save_state()
+        self._start_checked = True
+        if self.model_replaced and self._settings_path.exists():    # the fallback is dealt with: keep the model that
+            try:                                   # calls now, so that the next restart has nothing to replace.  (No
+                self._save_settings()              # settings file: .env decides, and a file would beat a later fix of
+            except OSError as e:                   # it.)  A start must not fail on this file: the model is replaced
+                log.warning("settings file: %r", e)                                      # again at the next start
         self._event("start", rebuilt_run=self.real_run)
         log.info("Real orders: %s%s | %d real losses in a row (only a real WIN resets it) | %d attempts today, "
                  "budget left $%.2f | campaign P&L %+.2f%s", self.state.lower(),
@@ -762,14 +1124,16 @@ class AutoTrader:
         if c.auto_kill_file.exists():
             raise TradeError(f"the kill file {c.auto_kill_file} exists; delete it first")
         if self.tech_stop:
-            raise TradeError(f"stopped: {self.stop_reason}. Check the site, then 'live clear {self.tech_stop}'")
+            raise TradeError(self.stop_text())
         if self.state == "STOPPED" and time.time() - self.stopped_at < c.auto_rearm_cooloff_min * 60:
             left = c.auto_rearm_cooloff_min * 60 - (time.time() - self.stopped_at)
             raise TradeError(f"stopped {self.stop_reason}; the cool-off ends in {left / 60:.0f} min")
         if self.model not in self.CALLERS:
             raise TradeError("the calling model can't place orders")
+        if self.model == "fade_fair" and not self.fair_v:
+            raise TradeError("the new price has no recipe yet, so its model makes no calls; choose another model")
         self._roll_day()
-        if self.attempts_today >= c.auto_max_real_bets_day:
+        if c.auto_max_real_bets_day and self.attempts_today >= c.auto_max_real_bets_day:
             raise TradeError(f"{self.attempts_today} real orders today already (limit {c.auto_max_real_bets_day})")
         if self.budget_left() < c.auto_stake_usd:
             raise TradeError(f"today's budget is used up (real P&L today {self.day_live_pnl:+.2f}, "
@@ -777,8 +1141,9 @@ class AutoTrader:
         if self.campaign_pnl <= -c.auto_campaign_loss_usd:
             raise TradeError(f"the campaign lost {self.campaign_pnl:+.2f}, past -${c.auto_campaign_loss_usd:g}: "
                              "real orders are over (a new campaign needs a new state file)")
-        if self.balance_usd is not None and self.balance_usd < c.auto_min_bankroll_stakes * c.auto_stake_usd:
-            raise TradeError(f"balance ${self.balance_usd:.2f} is below {c.auto_min_bankroll_stakes} stakes")
+        if self.balance_usd is not None and self.balance_usd < max(1, c.auto_min_bankroll_stakes) * c.auto_stake_usd:
+            raise TradeError(f"balance ${self.balance_usd:.2f} is below " + (
+                f"{c.auto_min_bankroll_stakes} stakes" if c.auto_min_bankroll_stakes > 1 else f"the stake ${c.auto_stake_usd:g}"))
         gate = self.gate_status()
         if not gate["open"] and not force:
             raise TradeError(f"the gate is closed: {gate['text']}. Add 'force' to arm anyway (your decision; logged)")
@@ -786,6 +1151,7 @@ class AutoTrader:
             raise TradeError("no ladder is configured: set AUTO_REAL_LADDER (e.g. 1,2) in .env first")
         if not self.campaign_since:
             self.campaign_since = time.time()
+        self._sync_trader_cap()
         grant = self.real_run >= c.auto_max_real_run
         self.state, self.armed_at, self.stop_reason, self.tech_stop = "ARMED", time.time(), None, None
         self.rearm_grant = grant
@@ -795,18 +1161,27 @@ class AutoTrader:
         self.rearms += int(grant)
         self._save_state()
         self._event("arm", who=who, ack_run=int(ack_run), grant=grant, force=force, gate_open=gate["open"],
-                    ladder=self.ladder_on(), stakes=[x * c.auto_stake_usd for x in c.auto_real_ladder] if self.ladder_on() else None)
-        lad_txt = ("compensate ladder " + "-".join(f"{x * c.auto_stake_usd:g}" for x in c.auto_real_ladder)
+                    ladder=self.ladder_on(), stakes=[x * c.auto_stake_usd for x in self._real_ladder()] if self.ladder_on() else None)
+        lad_txt = ("compensate ladder " + "-".join(f"{x * c.auto_stake_usd:g}" for x in self._real_ladder())
                    + (" (your decision: the gate is closed)" if self.ladder_forced else "")
                    if self.ladder_on() else
                    "flat (the compensate ladder waits for the gate; add 'ladder' to use it anyway)"
                    if len(c.auto_real_ladder) > 1 else "flat")
-        msg = (f"ARMED ({lad_txt}): real orders of ${self.stake():g} by {self.MODELS[self.model]} for up to "
-               f"{c.auto_arm_ttl_h:g} h. Stops at {c.auto_max_real_run} real losses in a row, at -${c.auto_daily_loss_usd:g} "
-               f"today, after {c.auto_max_real_bets_day} orders a day, at -${c.auto_campaign_loss_usd:g} in all. "
+        msg = (f"ARMED ({lad_txt}): real orders of ${self.stake():g} by {self.MODELS[self.model]} "
+               + (f"for up to {c.auto_arm_ttl_h:g} h" if c.auto_arm_ttl_h else "until you switch to Paper")
+               + f". Stops at {c.auto_max_real_run} real losses in a row, at -${c.auto_daily_loss_usd:g} "
+               f"today, {f'after {c.auto_max_real_bets_day} orders a day, ' if c.auto_max_real_bets_day else ''}"
+               f"at -${c.auto_campaign_loss_usd:g} in all. "
                + (f"You are past the run limit ({self.real_run} losses): this arming allows ONE real order; a loss "
                   f"stops it again." if grant else "")
-               + ("" if gate["open"] else f" The gate is closed ({gate['text']}): expect to lose."))
+               + ("" if gate["open"] else f" The gate is closed ({gate['text']})"
+                  + (": its edge is not proven." if self.model in POOL_BOOKED else ": expect to lose."))
+               + (" Thin side with a stake rule: your own stake goes into the thin pool, so the bigger steps are paid "
+                  "less ($32 into a $105 pool: x2.2 -> x1.9); the finding was made at a flat $1."
+                  if self.model == "thin" and self.ladder_on() else "")
+               + (" Value bet with a stake rule: it was measured at a flat $1. It wins about half its bets (runs of "
+                  "six losses about 3 times a day, the longest on the log 9), and a bigger stake is paid less."
+                  if self.model == "value" and self.ladder_on() else ""))
         log.warning(msg)
         return msg
 
@@ -814,8 +1189,11 @@ class AutoTrader:
         if self.state == "ARMED":
             self._event("disarm", reason=why, who=who)
             log.warning("Real orders DISARMED (%s)", why)
-        self.state, self.rearm_grant, self._prepared_rid = "DISARMED", False, 0
-        self.ladder_forced, self.stop_reason = False, None
+        # a technical stop outlives Paper: STOPPED, with its reason, until the owner clears it on the page
+        self.state = "STOPPED" if self.tech_stop else "DISARMED"
+        self.rearm_grant, self._prepared_rid, self.ladder_forced = False, 0, False
+        if not self.tech_stop:
+            self.stop_reason = None
         self._save_state()
 
     def kill(self, who: str = "operator") -> None:
@@ -843,6 +1221,47 @@ class AutoTrader:
         log.warning(msg)
         return msg
 
+    # the real-money limits the operator sets on the page: name -> (Config field, type, lowest, highest)
+    LIMITS = {"max_real_run": ("auto_max_real_run", int, 1, 20),          # stop at this many real losses in a row
+              "daily_loss_usd": ("auto_daily_loss_usd", float, 1, 2000)}  # the most real money lost in a day
+
+    def _apply_limits(self) -> None:
+        for key, v in self.limits_set.items():
+            self.cfg = dataclasses.replace(self.cfg, **{self.LIMITS[key][0]: v})
+        self._sync_trader_cap()
+
+    def stake_cap(self) -> float:
+        """The largest real stake.  Flat on the page: AUTO_MAX_STAKE_USD.  With a stake rule (x1.5, x2) there is no
+        separate cap (the owner removed it on 2026-11-10): the series runs for as many losses as the losses-in-a-row
+        stop allows, so its last step is the largest stake."""
+        c = self.cfg
+        if self.progression == 1.0:
+            return c.auto_max_stake_usd
+        return round(c.auto_stake_usd * self.progression ** (max(1, c.auto_max_real_run) - 1), 2)
+
+    def _sync_trader_cap(self) -> None:
+        tc = getattr(self.trader, "cfg", None)             # the order path has its own cap (MAX_USD): keep it in step
+        if tc is not None and tc.max_usd < self.stake_cap():
+            self.trader.cfg = dataclasses.replace(tc, max_usd=self.stake_cap())
+
+    def set_limit(self, key: str, value, who: str = "operator") -> str:
+        """One of the operator's own real-money limits (LIMITS).  Kept across restarts (auto_settings.json, beats
+        .env) and written to the events log.  A stop that already happened is not undone by it."""
+        field, typ, lo, hi = self.LIMITS[key]
+        v = typ(value)
+        if not lo <= v <= hi:
+            raise TradeError(f"{key} must be between {lo} and {hi}")
+        was = getattr(self.cfg, field)
+        self.limits_set[key] = v
+        self._apply_limits()
+        self._save_settings()
+        self._event("limit", who=who, key=key, was=was, now=v)
+        log.warning("Real-money limit %s is now %g (was %g), set by %s", key, v, was, who)
+        return f"{key} is now {v:g}"
+
+    def set_max_real_run(self, n: int, who: str = "operator") -> str:
+        return self.set_limit("max_real_run", n, who)
+
     def reset_run(self, ack_run: int, reason: str, who: str = "operator") -> str:
         """Set the run of real losses back to 0 by hand: the operator's decision (a new model, a new experiment),
         typed with the current count and a reason, written to the events log and kept across restarts (real orders
@@ -854,7 +1273,7 @@ class AutoTrader:
         if len(reason) < 3:
             raise TradeError("say why (for example 'new model overshoot'); it goes into the events log")
         if self.tech_stop:
-            raise TradeError(f"stopped: {self.stop_reason}. Check the site, then 'live clear {self.tech_stop}' first")
+            raise TradeError(self.stop_text())
         if self.state == "STOPPED" and time.time() - self.stopped_at < c.auto_rearm_cooloff_min * 60:
             left = c.auto_rearm_cooloff_min * 60 - (time.time() - self.stopped_at)
             raise TradeError(f"stopped {self.stop_reason}; the cool-off ends in {left / 60:.0f} min")
@@ -893,6 +1312,16 @@ class AutoTrader:
         self._save_state()
         return f"cleared; {self.real_run} real losses in a row; disarmed"
 
+    def stop_text(self) -> str | None:
+        """The technical stop in force, in plain words for the page: what happened and when, what to check on
+        bc.game, how to go on.  None when there is none."""
+        if not self.tech_stop:
+            return None
+        what, check = TECH_STOPS.get(self.tech_stop, (self.tech_stop, "bc.game"))
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(self.stopped_at)) if self.stopped_at else "an earlier day"
+        return (f"Real orders have been stopped since {when}: {self.stop_reason or what}. Check {check}. "
+                "Then press 'Clear stop' on this page and switch to LIVE again.")
+
     def _hard_stop(self, why: str, tech: str | None = None) -> None:
         """Real orders stop and the bot disarms.  It never resumes by itself: the operator must re-arm, naming the
         current run of losses (and clear the technical reason first, when there is one)."""
@@ -904,7 +1333,7 @@ class AutoTrader:
         self._save_state()
         self._event("stop", reason=why, tech=tech)
         log.warning("REAL ORDERS STOPPED: %s. %s", why,
-                    f"Check the site, then 'live clear {tech}'." if tech else
+                    f"Check the site, then clear the stop: 'Clear stop' on the page (or 'live clear {tech}')." if tech else
                     f"To go on: 'live arm run={self.real_run} day={time.strftime('%Y-%m-%d')}' "
                     f"(after {self.cfg.auto_rearm_cooloff_min:g} min).")
 
@@ -920,9 +1349,20 @@ class AutoTrader:
         is_open = n >= self.GATE_MIN_N and lo > self.BREAK_EVEN
         scope = ("rounds since it was fixed (" + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(MODEL_REGISTERED[self.model]))
                  + ")") if fwd else "all logged rounds"
+        if self.model in OB_FITTED:                 # fitted again as the recording grows: each fit has its own record
+            scope = f"the rounds of its fit {self.ob_v} (a new fit starts the record again)"
+        elif self.model == "sign":
+            scope = ("rounds since it reads the six markets' order books ("
+                     + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(SIGN_SIX_SINCE)) + ")")
         text = (f"{self.MODELS.get(self.model, self.model)} {k}/{n} = {k / n:.1%} (95% CI {lo:.1%}-{hi:.1%}) on {scope} "
                 f"vs break-even {self.BREAK_EVEN:.2%}, needs {self.GATE_MIN_N} calls" if n else
                 f"no forward record yet ({scope})")
+        if self.model == "thin":                    # its payout is not the x1.94 this gate assumes
+            text += (". Thin side is paid about x2.2, so it breaks even near 45.5% wins, not "
+                     f"{self.BREAK_EVEN:.2%}: judge it by its P&L, not by this win rate")
+        elif self.model == "value":                 # it bets where the payout is high: x2.0-2.1 on average
+            text += (". Value bet picks the side by chance x payout and is paid x2.0-2.1 on average, so it breaks "
+                     f"even at 47-50% wins, not {self.BREAK_EVEN:.2%}: judge it by its P&L, not by this win rate")
         return {"open": is_open, "n": n, "wins": k, "p": round(k / n, 4) if n else None,
                 "lo": round(lo, 4), "hi": round(hi, 4), "break_even": self.BREAK_EVEN, "min_n": self.GATE_MIN_N,
                 "text": text}
@@ -1023,7 +1463,7 @@ class AutoTrader:
                 pass
         if self.armed and self.cfg.auto_kill_file.exists():
             self.disarm(f"kill file {self.cfg.auto_kill_file.name} present", who="file")
-        if self.armed and time.time() - self.armed_at > self.cfg.auto_arm_ttl_h * 3600:
+        if self.armed and self.cfg.auto_arm_ttl_h and time.time() - self.armed_at > self.cfg.auto_arm_ttl_h * 3600:
             self.disarm(f"arming expired after {self.cfg.auto_arm_ttl_h:g} h", who="bot")
 
     async def _step(self) -> None:
@@ -1054,6 +1494,10 @@ class AutoTrader:
                 rec["feat"] = self._features(now, rec)   # the (slow) predict, for the prediction study
             except Exception as e:
                 rec["feat"] = {"error": repr(e)[:120]}
+            if self.cfg.auto_ob_url:                               # the order-book models' P(UP) at this instant
+                asyncio.ensure_future(self._ob_fetch(rid, rec))    # (its own process; the round loop never waits for
+            elif self.model in OB_MODELS:                          # it; a call by one of them is made in there)
+                self._ob_no_call(rec, "the order-book service is switched off (AUTO_OB_URL is empty)")
             rec["hawkes_task"] = asyncio.ensure_future(self._hawkes(rid, rec))     # never awaited here
             try:                                                   # P(UP) for every round (all three scored)
                 ps = self.prob.predict_all(rec["feat"])
@@ -1061,30 +1505,31 @@ class AutoTrader:
             except Exception as e:
                 rec["prob"] = rec["prob_gbm"] = rec["prob_ens"] = None
                 log.warning("P(UP) models: %r", e)
-            if self.model in ("prob", "gbm", "ens"):
-                key = {"prob": "prob", "gbm": "prob_gbm", "ens": "prob_ens"}[self.model]
+            if self.model in ("prob", "ens"):
+                key = {"prob": "prob", "ens": "prob_ens"}[self.model]
                 asyncio.ensure_future(self._call(rid, rec, ProbModel.side(rec[key])))
-            if self.model == "mom":                                  # momentum calls at snapshot A, at once
-                asyncio.ensure_future(self._call(rid, rec, _mom_call(rec["feat"])))
-            elif self.model == "book":                               # strong book: at snapshot A, or no call
-                asyncio.ensure_future(self._call(rid, rec, _book_call(rec["feat"])))
-            elif self.model == "bookmom":                            # strong book + same-way trend, or no call
-                asyncio.ensure_future(self._call(rid, rec, _bookmom_call(rec["feat"])))
-            elif self.model == "momvol":                             # momentum in volatile minutes only
-                asyncio.ensure_future(self._call(rid, rec, _momvol_call(rec["feat"])))
-            elif self.model == "revert":                             # quiet market: bc.game undoes its last move
+            if self.model == "revert":                               # quiet market: bc.game undoes its last move
                 asyncio.ensure_future(self._call(rid, rec, _revert_call(rec["feat"])))
             elif self.model in ("overshoot", "overshoot_book"):      # bc.game ran ahead of the market: snap-back
                 asyncio.ensure_future(self._call(rid, rec, _overshoot_call(rec["feat"], self.model == "overshoot_book")))
+            elif self.model == "fade_fair":                          # the Gap fade against the separate new price
+                asyncio.ensure_future(self._call(rid, rec, _fade_fair_call(rec["feat"])))
+            elif self.model == "fade_strict":                        # the same bet from 2.45 x the volatility: fewer bets
+                asyncio.ensure_future(self._call(rid, rec, _fade_strict_call(rec["feat"])))
+            elif self.model == "fade_flow2":                         # ... and the gap is at least 2 x the volatility
+                asyncio.ensure_future(self._call(rid, rec, _fade_flow2_call(rec["feat"])))
+            elif self.model == "fade_flow":                          # the Gap fade, when the futures' flow agrees
+                asyncio.ensure_future(self._call(rid, rec, _fade_flow_call(rec["feat"])))
+            elif self.model == "fade":                               # the same bet from 1 x the volatility
+                asyncio.ensure_future(self._call(rid, rec, _fade_call(rec["feat"])))
             elif self.model == "overshoot_rel":                      # the snap-back, scaled by the volatility
                 asyncio.ensure_future(self._call(rid, rec, _overshoot_rel_call(rec["feat"])))
-            elif self.model == "jump":                               # a big 10 s move continues
-                asyncio.ensure_future(self._call(rid, rec, _jump_call(rec["feat"])))
             elif self.model == "trees_mid":                          # the tree model, medium activity only
                 asyncio.ensure_future(self._call(rid, rec, _treesmid_call(rec["feat"])))
-        if "mhh_done" not in rec and now >= cutoff - self.flow_model.lead_ms / 1000:   # MHH's own lead (2 s)
-            rec["mhh_done"] = True
-            asyncio.ensure_future(self._mhh(rid, rec))
+            elif self.model == "thin":                               # no prediction: the side that pays 2.10 or more
+                asyncio.ensure_future(self._call(rid, rec, _thin_call(rec["feat"])))
+            elif self.model == "value":                              # chance (from the gap) x payout at least 1.05
+                asyncio.ensure_future(self._call(rid, rec, _value_call(rec["feat"])))
         if "feat_mid" not in rec and now >= cutoff - self.cfg.auto_mid_snapshot_s:
             try:                                  # snapshot M (paper research): the same short list as snapshot B,
                 rec["feat_mid"] = self._features(now, rec, late=True)   # at a lead a real order could still make
@@ -1098,8 +1543,178 @@ class AutoTrader:
         for old in sorted(self.recs)[:-50]:          # keep the newest 50 rounds (ids grow by ~1e6 per round,
             self.recs.pop(old, None)                # so "rid - 50" kept only the current one; the charts need more)
 
+    def _ob_no_call(self, rec: dict, why: str) -> None:
+        """An order-book model makes the calls and has no answer for this round: no bet, and the round says why."""
+        if not rec.get("call") and not rec.get("skip"):
+            rec["skip"] = why
+            self.stats["skipped"] += 1
+
+    async def _ob_fetch(self, rid: int, rec: dict) -> None:
+        """Ask the order-book service (tools/ob_server.py: the books and trades of the six markets of our price,
+        its own process) for its models' P(UP) at the decision, with the gap and vol60 of this snapshot.  The answer
+        is logged with the round (rec["ob"]: version, P(UP) and betting level per model) and every one of them is
+        scored on it.  When one of them is the calling model, its call is made here, as soon as the answer is in
+        (0.04-0.5 s after the decision; no answer in 0.8 s = no call in this round)."""
+        f = rec.get("feat") or {}
+        now = self.bc_now()                 # a, b: when the round's window starts and ends, from now (for ob_hawkes)
+        q = {k: f"{v:.4f}" for k, v in (("gap", f.get("dev_tick")), ("vol", f.get("vol60")),
+                                        ("a", rec["start"] - now if "start" in rec else None),
+                                        ("b", rec["end"] - now if "end" in rec else None))
+             if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v}
+        try:
+            if self._ob_http is None or self._ob_http.closed:
+                self._ob_http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0.8))
+            async with self._ob_http.get(self.cfg.auto_ob_url, params=q) as r:
+                d = await r.json()
+        except Exception as e:
+            self.ob_info = {"ok": False, "error": (repr(e) or type(e).__name__)[:100], "at": time.time()}
+            if self.model in OB_MODELS:
+                self._ob_no_call(rec, "the order-book service did not answer")
+            return
+        rec["ob"] = {"v": d.get("v") or 0, "p": d.get("p") or {}, "thr": d.get("thr") or {}, "n_ok": d.get("n_ok"),
+                     "lead_s": round(rec["cutoff"] - self.bc_now(), 3)}
+        if d.get("hk"):                     # ob_hawkes: each market's own P(UP), the share of our price it covered
+            rec["ob"]["hk"] = d["hk"]
+        if d.get("life"):                   # the five markets' best-price reading, its age, the price's move since
+            rec["ob"]["life"] = d["life"]   # (what ob_steady decides on; logged in every round)
+        self.ob_info = {"ok": True, "at": time.time(), **(d.get("status") or {})}
+        if self.model in OB_MODELS:         # this model makes the calls (paper, and real orders when armed)
+            v = rec["ob"]["v"]
+            if self.model in OB_FITTED and v and v != self.ob_call_v:
+                if self.ob_call_v and self.armed:       # a new fit took the model's place while real orders are on:
+                    self._event("ob_fit", model=self.model, version=v, was=self.ob_call_v)   # written down, no stop
+                    log.warning("%s: fit %s replaced fit %s while real orders are on", self.MODELS[self.model], v, self.ob_call_v)
+                self.ob_call_v = v
+            key = OB_ANSWER[self.model]         # "sign" is ob_hawkes in the answer
+            p = rec["ob"]["p"].get(key)
+            if p is None:
+                self._ob_no_call(rec, "the order-book service has no answer from this model"
+                                 + ("" if v or self.model not in OB_FITTED else " (not fitted yet)"))
+            else:
+                call = _ob_side(p, rec["ob"]["thr"].get(key))
+                if call is None and self.model == "ob_steady":      # no bet: the round says what the books showed
+                    self._ob_no_call(rec, "no steady reading: " + _steady_text(rec["ob"].get("life"))
+                                     + f" (a bet needs {50 + 50 * STEADY_MIN:.0f}% for {STEADY_AGE_S:g} s)")
+                else:
+                    await self._call(rid, rec, call)
+
+    def _ob_roll(self, rec: dict) -> None:
+        """The order-book models are fitted again as the recording grows.  A round answered by a newer version
+        starts their records again: each version is judged on its own rounds, all of them after its fit.  Not
+        ob_hawkes: it is fitted again every 20 s by design and keeps one record."""
+        v = (rec.get("ob") or {}).get("v") or 0
+        if v > self.ob_v:
+            self.ob_v = v
+            for name in OB_FITTED:
+                for key in ("called", "correct", "pnl", "fwd_called", "fwd_correct"):
+                    self.stats.pop(f"{name}_{key}", None)
+                self.runs.pop(name, None)
+                self.runs_today.pop(name, None)
+                self.curves.pop(name, None)
+                if name in self.ladders:
+                    self.ladders[name] = {"pnl": 0.0, "staked": 0.0, "biggest": 0.0, "step": 0}
+
+    # ---------- the order-book card: what the books show right now ----------
+
+    async def _ob_life_loop(self) -> None:
+        """Once a second: ask the order-book service what the five markets' best prices show right now (GET /life),
+        for the order-book card.  It is shown only: nothing here is logged, scored or used for a call.  The reading a
+        round is decided on is the one in the service's answer to the bot's question (rec["ob"]["life"])."""
+        while True:
+            await asyncio.sleep(OB_LIFE_EVERY_S)
+            try:
+                await self._ob_life_fetch()
+            except Exception as e:                       # the loop never ends; the card says "no reading" by itself
+                log.debug("order-book card: %r", e)
+
+    async def _ob_life_fetch(self) -> None:
+        url = self.cfg.auto_ob_url.rsplit("/", 1)[0] + "/life"
+        try:
+            if self._life_http is None or self._life_http.closed:    # its own connection: never the question's
+                self._life_http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0.5))
+            async with self._life_http.get(url) as r:
+                d = await r.json()
+        except Exception:
+            return                                       # no answer: the last one goes stale (OB_LIFE_STALE_S)
+        self._ob_life_take(d)
+
+    def _ob_life_take(self, d, at: float | None = None) -> None:
+        """Keep one answer of GET /life: the reading for the card, and one point of its small graph."""
+        if not isinstance(d, dict):
+            return
+        at = time.time() if at is None else at
+        r, age = (float(d[k]) if _is_num(d.get(k)) else None for k in ("r", "age"))
+        per = d.get("per") if isinstance(d.get("per"), dict) else {}
+        self.ob_life = {"at": at, "r": r, "age": age, "per": {str(k): float(v) for k, v in per.items() if _is_num(v)}}
+        if r is not None:
+            self.ob_life_hist.append((at, max(-1.0, min(1.0, r))))
+
+    def _ob_card(self) -> str:
+        """The order-book card: the best-price reading of five of the six markets the order-book models read (Bybit,
+        OKX and Binance futures, OKX spot, Coinbase, by their share in our price; Bitfinex perp's best price is
+        thin), averaged over 1 s, and how long it has been on its present side.  Under the graph, for the last round
+        that was decided: the reading at the decision (the one the round was decided on, rec["ob"]["life"]) and the
+        reading when that round's window opened, with "turned" when it had changed side by then (the owner's case:
+        "the OB was showing Buying, but when the bet round is starting that has already ended").
+        The same numbers as "ob_steady" and the fitted models' lifetime inputs (obfeat.life_mixed).
+        Until 2026-11-18 this card showed Binance SPOT's top 20 levels: not one of the six, a market bc.game's price
+        does not follow, and above 71% on one side in half of the rounds; that feed still gives the logged inputs
+        (obi20 ...).  The owner watches this card against the result, so it must show what the models read."""
+        lf, now = self.ob_life, time.time()
+        r, age = lf.get("r"), lf.get("age")
+        head = ('<div class="ct"><span title="Sizes at the best bid and ask of Bybit, OKX and Binance futures, OKX '
+                'spot and Coinbase, mixed by their share in our price, averaged over the last second. The order-book '
+                'models read these books.">ORDER BOOKS &middot; 5 MARKETS</span><span class="mute">{}</span></div>')
+        stale = now - lf.get("at", 0.0) > OB_LIFE_STALE_S
+        if not self.cfg.auto_ob_url or stale or r is None or age is None:
+            why = ("the order-book service is switched off" if not self.cfg.auto_ob_url else
+                   "the order-book service does not answer" if stale else "the books are not known right now")
+            return (f'<div class="c">{head.format("no reading")}<div class="big mute">&ndash;</div>'
+                    f'<div class="obw mute">{why}</div></div>')
+        pct = round(50 + 50 * abs(r))                   # as the big number shows it: the words and the colour go by it
+        side_cls = ("up" if r > 0 else "down") if pct >= 60 else ""            # coloured from 60% on one side
+        color = {"up": "#22d27a", "down": "#ff5468"}.get(side_cls, "#c3ccd8")
+        who = "buyers" if r > 0 else "sellers"
+        words = "balanced" if pct < 60 else f"mostly {who}" if pct >= 75 else f"more {who}"
+        per = [v for v in lf.get("per", {}).values() if v]
+        if per and r:                                   # how many of the markets are on the mixed reading's side
+            words += f" &middot; {sum(v * r > 0 for v in per)} of {len(per)} markets"
+        fill = (f"left:50%;width:{r * 50:.1f}%;background:#22d27a" if r >= 0 else
+                f"left:{50 + r * 50:.1f}%;width:{-r * 50:.1f}%;background:#ff5468")
+        hist = [(t, h) for t, h in self.ob_life_hist if now - t <= OB_LIFE_SHOW_S]
+        sw, sh = 212, 40
+        spark = ""
+        if len(hist) >= 2:
+            pts = " ".join(f"{(1 - (now - t) / OB_LIFE_SHOW_S) * sw:.1f},{sh / 2 - h * sh / 2 * 0.92:.1f}" for t, h in hist)
+            spark = (f'<svg class="spark" viewBox="0 0 {sw} {sh}" preserveAspectRatio="none">'
+                     f'<line x1="0" y1="{sh / 2}" x2="{sw}" y2="{sh / 2}" stroke="#5b6573" stroke-dasharray="3 3"/>'
+                     f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6"/></svg>')
+        rec = next((x for _, x in sorted(self.recs.items(), reverse=True) if (x.get("ob") or {}).get("life")), {})
+        was = (rec.get("ob") or {}).get("life") or {}
+        then = began = "&ndash;"
+        if _is_num(was.get("r")) and _is_num(was.get("age")):
+            then = _reading_text(was["r"], was["age"])
+            if _is_num(rec.get("start")):               # the round's times are on bc.game's clock, the graph's on ours
+                t0 = rec["start"] + now - self.bc_now()
+                at = next((h for t, h in self.ob_life_hist if t0 <= t <= t0 + 2 * OB_LIFE_EVERY_S + 0.5), None)
+                if at is not None:
+                    began = (_reading_text(at, 0.0).partition(" for ")[0]
+                             + (" &middot; <b>turned</b>" if at * was["r"] < 0 else ""))
+        big, _, since = _reading_text(r, age).partition(" for ")
+        return (
+            f'<div class="c {"ob" + ("up" if side_cls == "up" else "dn") if side_cls else ""}">{head.format("live")}'
+            f'<div class="big {side_cls}">{big}<small>for {since}</small></div><div class="obw {side_cls}">{words}</div>'
+            f'<div class="obbar"><i style="{fill}"></i></div>'
+            f'<div class="two mute sm"><span>all sellers</span><span>even</span><span>all buyers</span></div>{spark}'
+            f'<div class="two mute sm"><span>best price &middot; 1 s average</span><span>last 2 min</span></div>'
+            f'<div class="row"><span>at decision</span><span>{then}</span></div>'
+            f'<div class="row"><span title="When the 5 s window of that round opened">at start</span>'
+            f'<span>{began}</span></div></div>')
+
     async def _hawkes(self, rid: int, rec: dict) -> None:
-        """HawkesTime + HawkesSign forecasts (always scored); the call when the model is sign."""
+        """The Hawkes forecast on Bitfinex spot's book (the bot's own predictor): logged with every round, and the
+        call when the model is Gap fade + Hawkes.  HawkesSign itself ("sign") is the six-market forecast since
+        SIGN_SIX_SINCE and is called from the order-book service's answer (_ob_fetch)."""
         now = self.bc_now()
         a = rec["start"] - now                 # the window starts this long from now (bc.game's clock)
         c = self.cfg
@@ -1107,10 +1722,15 @@ class AutoTrader:
             rec["skip"] = f"odd timing (window starts in {a:.1f} s)"     # a replayed or mistimed round: not
             self.stats["skipped"] += 1                                    # predicted, not scored, not in the history
             return
-        p = await asyncio.to_thread(self.pred.predict, a, rec["end"] - now)
+        calling = self.model == "fade_hawkes"
+        b, at = rec["end"] - now, self.pred.feed.now()     # the forecast is made as of this instant, whenever it runs
+        if not calling:                                    # not needed for the call: keep the loop free for the order
+            wait = rec["cutoff"] - min(c.auto_send_margin_s, c.auto_late_snapshot_s) + HAWKES_AFTER_S - self.bc_now()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        p = await asyncio.to_thread(self.pred.predict, a, b, at)
         p["done_lead_s"] = round(rec["cutoff"] - self.bc_now(), 3)        # how long before the cutoff it finished
         rec["pred"] = p
-        calling = self.model == "sign"
         if not p.get("ready"):
             if calling:
                 rec["skip"] = "Hawkes models warming up (%.0f s of data)" % self.pred.data_span()
@@ -1120,46 +1740,10 @@ class AutoTrader:
         z = abs(p["exp_ret"]) / hist.std() if len(hist) >= 20 and hist.std() > 0 else None
         self.history.append(p["exp_ret"])
         rec["z"] = z
-        log.info("round %s Hawkes: time %s (exp 5s return %+.2e, z %s)  sign P(up) %.2f  ~%.1f changes  "
-                 "(lead %.1fs, calc %d ms, done %.2fs before cutoff)", rid, p["time_call"] or "-", p["exp_ret"],
-                 f"{z:.2f}" if z is not None else "-", p["sign_p_up"], p["n_changes"], p["lead_s"], p["calc_ms"],
-                 p["done_lead_s"])
-        if calling:
-            await self._call(rid, rec, _sign_call(p))
-
-    async def _mhh(self, rid: int, rec: dict) -> None:
-        """The MHH bot's Binance-flow logit (always scored); the call when the model is mhh, or agree (with
-        HawkesSign's forecast, made 1 s earlier)."""
-        m = self.flow_model.predict(self.flow)
-        rec["mhh"] = m
-        if "error" not in m:
-            log.info("round %s MHH flow: P(up) %.3f conf %.3f -> %s", rid, m["p_up"], m["conf"], m["call"])
-        if self.model == "agree":
-            task = rec.get("hawkes_task")
-            if task is not None and not task.done():            # wait for HawkesSign, but never past the margin
-                timeout = max(0.0, rec["cutoff"] - self.bc_now() - self.cfg.auto_send_margin_s - 0.1)
-                try:
-                    await asyncio.wait_for(asyncio.shield(task), timeout)
-                except (asyncio.TimeoutError, Exception):
-                    pass
-            sign = _sign_call(rec.get("pred") or {})
-            if "error" in m or sign is None:
-                rec["skip"] = m.get("error") or ("HawkesSign not ready in time" if task and not task.done()
-                                                 else "HawkesSign has no forecast")
-                self.stats["skipped"] += 1
-            elif sign != m["call"]:
-                rec["skip"] = f"models disagree (HawkesSign {sign}, MHH {m['call']})"
-                self.stats["skipped"] += 1
-            else:
-                await self._call(rid, rec, sign)
-            return
-        if self.model != "mhh":
-            return
-        if "error" in m:
-            rec["skip"] = m["error"]
-            self.stats["skipped"] += 1
-            return
-        await self._call(rid, rec, m["call"])
+        log.info("round %s Hawkes on Bitfinex spot P(up) %.2f  ~%.1f changes  (lead %.1fs, calc %d ms, done %.2fs before cutoff)",
+                 rid, p["sign_p_up"], p["n_changes"], p["lead_s"], p["calc_ms"], p["done_lead_s"])
+        if calling:                                # fade_hawkes: the Gap fade's side, when this forecast agrees
+            await self._call(rid, rec, _fade_hawkes_call(rec.get("feat"), p))
 
     async def _call(self, rid: int, rec: dict, call: str | None) -> None:
         """Record the calling model's UP / DOWN (paper), place it for real when armed, and in shadow mode run
@@ -1171,6 +1755,8 @@ class AutoTrader:
             self.stats["skipped"] += 1
             return
         rec["call"] = call
+        if self.model in POOL_BOOKED:
+            rec["by"] = self.model                      # its paper bet is shown as booked from the final pools
         rec["decided_lead_s"] = round(rec["cutoff"] - self.bc_now(), 3)
         stake = self.stake()
         rec["stake"] = stake if self.armed else self.paper_stake()      # real: stake(); paper: the paper ladder
@@ -1267,7 +1853,7 @@ class AutoTrader:
                 return sum(pv) / len(pv) - sum(sv) / len(sv) if pv and sv else None
             b_now, b_10 = basis(now), basis(now - 10)
             f["basis_chg10"] = b_now - b_10 if b_now is not None and b_10 is not None else None
-            bk = self.book                                    # Binance spot top-20 book (the panel's OB card)
+            bk = self.book                                    # Binance spot top-20 book (logged inputs only)
             ages["binance_book"] = round(bk.age(), 2)
             if bk.age() <= 2.0:
                 f.update(obi1=bk.obi1, obi5=bk.obi5, obi20=bk.obi20, obi_w=bk.obi_w, micro_off=bk.micro_off,
@@ -1292,22 +1878,35 @@ class AutoTrader:
         pools = (rec or {}).get("pools")
         if pools:
             f["pool_up"], f["pool_dn"] = pools
-        else:
-            p = self.pools or {}
+        else:                                                 # no pool frame of this round yet: the last frame,
+            p = self.pools or {}                              # usually the previous round's final pools
             f["pool_up"], f["pool_dn"] = p.get("upPoolAmount"), p.get("downPoolAmount")
+            f["pools_prev"] = True                            # read by _thin_call only
         try:
             up, dn = float(f["pool_up"] or 0), float(f["pool_dn"] or 0)
             f["pay_up"] = 1 + PAY_K * dn / up if up > 0 else None
             f["pay_dn"] = 1 + PAY_K * up / dn if dn > 0 else None
         except (TypeError, ValueError):
             f["pay_up"] = f["pay_dn"] = None
-        if now - tick_t > 1.0:
-            stale.append("bc_ticks")
+        held_by = list(stale) + ([] if our_now is not None else ["our price"])   # what holds a real order back:
+        if now - tick_t > 1.0:                                # ... not bc.game's own ticks being late (the owner,
+            stale.append("bc_ticks")                          # 2026-11-17): logged as stale, the order goes out
         if not self.feed.connected:
             stale.append("bitfinex_lob")
+            held_by.append("bitfinex_lob")
         ages["bc_tick"] = round(now - tick_t, 3)
         f["dq"] = {"ok": now - tick_t <= 1.0 and our_now is not None and self.clock.ok() and self.feed.connected,
-                   "stale": stale, "ages": ages}
+                   "stale": stale, "ages": ages, "held_by": held_by}
+        if self.fair is not None:                             # the separate new price: logged next to our price,
+            try:                                              # read by no model but fade_fair.  Last, so that nothing
+                fsnap = self.fair._snapshot()                 # above is read later than it was without it
+                f["fair"] = self.fair.value(now, fsnap, max_age=STALE_SNAPSHOT, min_weight=MIN_WEIGHT)
+                f["fair_v"] = self.fair_v
+                fair_tick = self.fair.value(tick_t, fsnap, max_age=STALE_SNAPSHOT, min_weight=MIN_WEIGHT)
+                if fair_tick is not None:
+                    f["dev_fair"] = bc_now - fair_tick        # bc.game's gap from the new price at the tick's time
+            except Exception as e:                            # noqa: BLE001 - it must never break a snapshot
+                f["fair_error"] = repr(e)[:80]
         return {k: (round(v, 6) if isinstance(v, float) else v) for k, v in f.items()}
 
     def ladder_on(self) -> bool:
@@ -1315,7 +1914,18 @@ class AutoTrader:
         go-live gate is open: the calling model has >= GATE_MIN_N calls with its Wilson lower bound above the
         break-even.  Without a proven edge a ladder only loses faster (docs/decision-review, section 7b).
         The operator can override that for one arming ('live arm ... force ladder'); it is logged."""
+        if self.progression != 1.0:                # the page's stake rule: the operator's choice, no gate needed
+            return len(self._real_ladder()) > 1
         return len(self.cfg.auto_real_ladder) > 1 and (self.gate_status()["open"] or (self.ladder_forced and self.armed))
+
+    def _real_ladder(self) -> tuple:
+        """The real stake series as multiples of the base stake.  With a stake rule chosen on the page (x1.5, x2):
+        1, p, p^2, ... one step for each loss the losses-in-a-row stop allows (no other cap).
+        Flat on the page: AUTO_REAL_LADDER from .env, as before."""
+        c = self.cfg
+        if self.progression == 1.0:
+            return tuple(c.auto_real_ladder)
+        return tuple(round(self.progression ** i, 4) for i in range(max(1, c.auto_max_real_run)))
 
     def stake(self) -> float:
         """The real stake: the flat base, or with the ladder on, base x the ladder step for the current run of real
@@ -1324,7 +1934,7 @@ class AutoTrader:
         c = self.cfg
         if not self.ladder_on():
             return c.auto_stake_usd
-        lad = c.auto_real_ladder
+        lad = self._real_ladder()
         return round(c.auto_stake_usd * lad[self.real_run % len(lad)], 2)
 
     def paper_stake(self) -> float:
@@ -1334,8 +1944,9 @@ class AutoTrader:
 
     # ---------- real orders: the checklist and the order path ----------
 
-    async def _refresh_balance(self) -> None:
-        """Read the page's balance (account currency and USD), the account kind and any dialog."""
+    async def _refresh_balance(self, quick: bool = False) -> None:
+        """Read the page's balance (account currency and USD), the account kind and any dialog.  quick (right
+        before a click): never wait for bc.game's price table, see RATE_KEEP_S."""
         try:
             st = await self.trader.status(light=True)
         except Exception as e:
@@ -1345,7 +1956,8 @@ class AutoTrader:
         rate = None
         if st.currency:
             try:
-                rate = await self.trader.usd_rate(st.currency)
+                rate = await (self.trader.usd_rate(st.currency, RATE_KEEP_S) if quick
+                              else self.trader.usd_rate(st.currency))
             except Exception:
                 rate = None
         if self.armed and self.balance_currency and st.currency and st.currency != self.balance_currency:
@@ -1379,8 +1991,8 @@ class AutoTrader:
             if self.state != "ARMED":
                 return f"not armed ({self.state.lower()}{': ' + self.stop_reason if self.stop_reason else ''})"
             if self.tech_stop:
-                return f"stopped: {self.stop_reason} (needs 'live clear {self.tech_stop}')"
-            if time.time() - self.armed_at > c.auto_arm_ttl_h * 3600:
+                return f"stopped: {self.stop_reason or self.tech_stop} (needs 'Clear stop' on the page)"
+            if c.auto_arm_ttl_h and time.time() - self.armed_at > c.auto_arm_ttl_h * 3600:
                 return "arming expired"
             if c.auto_kill_file.exists():
                 return "kill file present"
@@ -1391,25 +2003,27 @@ class AutoTrader:
         if run >= c.auto_max_real_run and not (self.rearm_grant and not shadow):
             return f"{run} real losses in a row (limit {c.auto_max_real_run})"
         self._roll_day()
-        if attempts >= c.auto_max_real_bets_day:
+        if c.auto_max_real_bets_day and attempts >= c.auto_max_real_bets_day:
             return f"{attempts} real orders today (limit {c.auto_max_real_bets_day})"
         budget = c.auto_daily_loss_usd + self.day_live_pnl
         if stake > budget + 1e-9:
             return f"today's budget left ${budget:.2f} is less than the stake"
         if self.campaign_pnl <= -c.auto_campaign_loss_usd:
             return f"campaign loss {self.campaign_pnl:+.2f} reached -${c.auto_campaign_loss_usd:g}"
-        if stake > c.auto_max_stake_usd:
-            return f"stake ${stake:g} above AUTO_MAX_STAKE_USD {c.auto_max_stake_usd:g}"
+        if stake > self.stake_cap() + 1e-9:
+            return f"stake ${stake:g} above the largest stake allowed ${self.stake_cap():g}"
         if self.balance_usd is None or time.time() - self.balance_at > c.auto_balance_max_age_s:
             return f"balance not read in the last {c.auto_balance_max_age_s:g} s"
         if self.balance_account != "REAL":
             return f"account is {self.balance_account or 'unknown'}, not REAL"
-        if self.balance_usd < c.auto_min_bankroll_stakes * stake:
+        if self.balance_usd < stake:              # the balance must at least cover this order
+            return f"balance ${self.balance_usd:.2f} is less than the stake ${stake:g}"
+        if self.balance_usd < c.auto_min_bankroll_stakes * min(stake, c.auto_stake_usd):     # off unless set in .env
             return f"balance ${self.balance_usd:.2f} is below {c.auto_min_bankroll_stakes} stakes"
         if self.dialog:
             return f"a dialog is open on the page ({self.dialog[:30]})"
-        if not self.clock.ok():
-            return f"bc.game clock not ok ({self.clock.why_not_ok()})"
+        if not self.clock.usable():               # a late tick alone is no reason (the owner, 2026-11-17): only a
+            return f"bc.game clock not ok ({self.clock.why_not_usable()})"      # clock that cannot time the order
         if now > rec["cutoff"] - c.auto_send_margin_s:
             return f"too late ({rec['cutoff'] - now:.2f} s before the cutoff, margin {c.auto_send_margin_s:g} s)"
         r = self.round or {}
@@ -1417,15 +2031,18 @@ class AutoTrader:
             return "betting closed or another round open"
         if time.time() - self.last_reload_at < 60:
             return "page reloaded or round feed reconnected less than 60 s ago"
-        if self._rejects and time.time() - self._rejects[-1][1] < 45:
-            return "an order was rejected in the previous round"
+        # (no pause after an order bc.game refused: removed on 2026-11-17 at the owner's request.  AUTO_REJECT_STOP
+        # refusals within 10 minutes still stop real orders, see _send.)
         if not manual:
             p = rec.get("pred") or {}
             if p.get("ready") and not (c.auto_min_lead_s <= p.get("lead_s", 0) <= c.auto_max_lead_s):
                 return f"odd forecast lead ({p.get('lead_s')} s)"
             dq = (rec.get("feat") or {}).get("dq") or {}
-            if dq and not dq.get("ok", True):
-                return "data quality: " + ", ".join(dq.get("stale") or ["?"])
+            if dq and not dq.get("ok", True):     # an exchange feed is stale or our price is unknown; bc.game's own
+                held = (dq["held_by"] if "held_by" in dq       # ticks being late is not among them any more
+                        else [s for s in (dq.get("stale") or ["?"]) if s != "bc_ticks"])
+                if held:
+                    return "data quality: " + ", ".join(held)
             if not shadow and (self._prepared_rid != rid or self._prepared_stake != stake):
                 return "order not prepared for this round"
         return None
@@ -1455,7 +2072,7 @@ class AutoTrader:
         grant, self.rearm_grant = self.rearm_grant, False       # a grant is spent by the attempt
         self.attempts_today += 1
         self.pending_real[rid] = stake
-        await self._refresh_balance()                           # the balance right before the click, to reconcile
+        await self._refresh_balance(quick=True)                 # the balance right before the click, to reconcile
         rec["balance_before"] = [self.balance, self.balance_currency]
         self._event("order_intent", rid=rid, side=call, stake=stake, who=who)
         try:
@@ -1565,6 +2182,13 @@ class AutoTrader:
             mix = self.our.move(rec["start"], rec["end"])                       # new: the weighted, delayed mix
             if mix is not None and not tie:
                 rec["mix_move"], rec["mix_v"] = mix, MIX_VERSION
+            if self.fair is not None:                                           # the same for the separate new price
+                try:
+                    fm = self.fair.move(rec["start"], rec["end"])
+                    if fm is not None and not tie:
+                        rec["fair_move"], rec["fair_v"] = fm, self.fair_v
+                except Exception as e:                                          # noqa: BLE001 - never breaks a settle
+                    log.warning("new price move: %r", e)
         call = rec.get("call")
         result = ("TIE" if tie else "WIN" if call == win else "LOSS") if call else None
         rec.update(win=win, tie=tie, result=result, start_price=sp, end_price=ep)
@@ -1664,15 +2288,19 @@ class AutoTrader:
             log.warning("round %s: balance moved %s but the order's result was %+.4f (Tap live is on, so the balance "
                         "check is only a note)", rec["id"], delta if delta is None else round(delta, 4), expected)
 
-    def _pnl(self, rec: dict, side: str | None, diluted: bool = False) -> float:
+    def _pnl(self, rec: dict, side: str | None, diluted: bool = False, pools: bool = False) -> float:
         """$-stake P&L of calling `side` in a settled round: that side's page payout when it was read (the called
         side's, else from the pair logged at call time), else the average; `diluted` books it as a pari-mutuel bet
-        of our stake into that side's pool.  (Recomputed on replay: early records logged payout 0.)"""
+        of our stake into that side's pool.  (Recomputed on replay: early records logged payout 0.)
+        `pools` (the "thin" model): paid as bc.game pays, from the round's final pools with our stake in them; its
+        bet is about the payout, and the page's payout is not read in rounds the calling model does not call."""
         if not side or rec.get("tie"):
             return 0.0
         stake = self.cfg.auto_stake_usd
         if side != rec.get("win"):
             return -stake
+        if pools and (pay := _pool_pay(rec, side, stake)):
+            return stake * (pay - 1)
         pay = rec.get("payout") or 0
         if side != rec.get("call") or pay <= 1:
             ps = rec.get("payouts") or []
@@ -1694,40 +2322,58 @@ class AutoTrader:
         except (KeyError, ValueError):
             return time.time()                        # a round settling right now
 
-    def _ladder_step(self, lad: dict, rec: dict, side: str) -> None:
+    def _ladder_step(self, lad: dict, rec: dict, side: str, pools: bool = False) -> None:
         """One paper bet at the progression stake: base x progression^losses-in-a-row, back to base after a win.
         It never gives up unless AUTO_LADDER_MAX_USD is set: then back to base when the next stake would pass it.
         P&L twice: at the payout the page showed (how the MHH dashboard counts it), and pool-adjusted (pnl): our
-        stake added to our side's pool lowers our own payout, which matters once the ladder bets are big."""
+        stake added to our side's pool lowers our own payout, which matters once the ladder bets are big.
+        `pools` (the "thin" model): both from the round's final pools (see _pnl)."""
         base = self.cfg.auto_stake_usd
         stake = base * self.progression ** lad["step"]
         won = side == rec.get("win")
-        pay = 1 + self._pnl(rec, side) / base
+        pay = 1 + self._pnl(rec, side, pools=pools) / base
         lad["pnl_shown"] = round(lad.get("pnl_shown", 0.0) + stake * (pay - 1), 4)
-        lad["flat"] = round(lad.get("flat", 0.0) + self._pnl(rec, side), 4)       # the same calls at the base stake
+        lad["flat"] = round(lad.get("flat", 0.0) + self._pnl(rec, side, pools=pools), 4)   # the same calls at the base stake
         lad["bets"] = lad.get("bets", 0) + 1
         lad["won"] = lad.get("won", 0) + int(won)
-        if won:
+        if won and pools and (exact := _pool_pay(rec, side, stake)):
+            pay = exact
+        elif won:
             pay = _diluted(pay, stake, rec.get("pools"), side)
         lad["pnl"] = round(lad["pnl"] + stake * (pay - 1), 4)
         lad["staked"] = round(lad["staked"] + stake, 4)
         lad["biggest"] = max(lad["biggest"], round(stake, 2))
         lad["step"] = 0 if won else lad["step"] + 1
-        cap = self.cfg.auto_ladder_max_usd
-        if cap and base * self.progression ** lad["step"] > cap:
+        cap = self.cfg.auto_ladder_max_usd or self.stake_cap()                 # the same series as the real orders
+        if cap and base * self.progression ** lad["step"] > cap + 1e-9:
             lad["step"] = 0
             lad["gave_up"] = lad.get("gave_up", 0) + 1
 
     def _run_step(self, name: str, won: bool, t: float) -> None:
         """Losing runs of one model: how many runs of each length (a run ends at the next win), and the current one.
         Kept twice: over all logged rounds (runs) and over today's rounds only (runs_today, reset at midnight)."""
+        self._run_into(self.runs, name, won, t)
+        self._run_day(name, won, t)
+
+    def _run_day(self, name: str, won: bool, t: float) -> None:
+        """Today's losing runs and every earlier day's longest one.  'P&L -> 0' does not cut these: they are counted
+        from the round log by calendar day."""
         lt = time.localtime()
         day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
         if day0 != self._runs_day0:
+            if self._runs_day0 and self.runs_today:            # midnight passed while running: file the day away
+                self.runs_days[time.strftime("%Y-%m-%d", time.localtime(self._runs_day0))] = {
+                    k: {"current": 0, "bets": r["bets"], "longest": max([r["current"], *r["lengths"]])}
+                    for k, r in self.runs_today.items()}
             self.runs_today, self._runs_day0 = {}, day0
-        self._run_into(self.runs, name, won, t)
         if t >= day0:
             self._run_into(self.runs_today, name, won, t)
+            return
+        d = self.runs_days.setdefault(time.strftime("%Y-%m-%d", time.localtime(t)), {}).setdefault(
+            name, {"current": 0, "longest": 0, "bets": 0})
+        d["bets"] += 1
+        d["current"] = 0 if won else d["current"] + 1
+        d["longest"] = max(d["longest"], d["current"])
 
     @staticmethod
     def _run_into(table: dict, name: str, won: bool, t: float) -> None:
@@ -1743,16 +2389,21 @@ class AutoTrader:
 
     def _count(self, rec: dict, replay: bool = False) -> None:
         """Add one settled round to the stats (also used to rebuild them from the log)."""
+        self._ob_roll(rec)
         s = self.stats
         if replay and rec.get("result"):
             rec["pnl"] = self._pnl(rec, rec.get("call"))
         win, result = rec.get("win"), rec.get("result")
+        if (rec.get("live") or {}).get("ok") and result:      # a settled real order, for the page's P&L graph; real
+            self.real_pts.append((self._rec_time(rec), float(rec.get("live_pnl", rec.get("pnl")) or 0.0)))   # money is not cut by 'P&L -> 0'
         if self._rec_time(rec) < self.stats_since:  # before 'P&L -> 0': only the gate's forward records count it
             if win and not rec.get("tie"):
                 for name, side in self._model_calls(rec).items():
                     if side and self._rec_time(rec) >= MODEL_REGISTERED.get(name, 0):
                         s[f"{name}_fwd_called"] = s.get(f"{name}_fwd_called", 0) + 1
                         s[f"{name}_fwd_correct"] = s.get(f"{name}_fwd_correct", 0) + int(side == win)
+                    if side:
+                        self._run_day(name, side == win, self._rec_time(rec))
             return
         s["rounds"] += 1
         if win:
@@ -1760,10 +2411,17 @@ class AutoTrader:
         if rec.get("bfx_ret") is not None:
             s["bfx_n"] += 1
             s["bfx_agree"] += int((rec["bfx_ret"] > 0) == (win == "UP"))
-        for prefix, field in (("our", "our_move"), ("mix", "mix_move")):   # did our price give bc.game's Up/Down?
-            om = rec.get(field)
-            if om is None or not win or rec.get("tie") or (prefix == "mix" and rec.get("mix_v") != MIX_VERSION):
-                continue                            # (rounds of an earlier mix are not counted for this one)
+        fm, mm = rec.get("fair_move"), rec.get("mix_move")      # the new price against our price on the same rounds
+        if (self.fair_v and rec.get("fair_v") == self.fair_v and rec.get("mix_v") == MIX_VERSION and win
+                and not rec.get("tie") and fm and mm):
+            s["cmp_n"] = s.get("cmp_n", 0) + 1
+            s["cmp_fair_ok"] = s.get("cmp_fair_ok", 0) + int((fm > 0) == (win == "UP"))
+            s["cmp_mix_ok"] = s.get("cmp_mix_ok", 0) + int((mm > 0) == (win == "UP"))
+        for prefix, field in (("our", "our_move"), ("mix", "mix_move"), ("fair", "fair_move")):   # did the price
+            om = rec.get(field)                                                    # give bc.game's Up/Down?
+            if (om is None or not win or rec.get("tie") or (prefix == "mix" and rec.get("mix_v") != MIX_VERSION)
+                    or (prefix == "fair" and (not self.fair_v or rec.get("fair_v") != self.fair_v))):
+                continue                            # (rounds of an earlier mix / recipe are not counted for this one)
             if om == 0:
                 s[f"{prefix}_flat"] = s.get(f"{prefix}_flat", 0) + 1     # our price didn't move: no answer
                 continue
@@ -1781,14 +2439,17 @@ class AutoTrader:
                 if side:
                     s[f"{name}_called"] = s.get(f"{name}_called", 0) + 1
                     s[f"{name}_correct"] = s.get(f"{name}_correct", 0) + int(side == win)
-                    s[f"{name}_pnl"] = round(s.get(f"{name}_pnl", 0.0)
-                                             + self._pnl(rec, side, diluted=name == "pool"), 4)
+                    bet = self._pnl(rec, side, diluted=name == "pool", pools=name in POOL_BOOKED)
+                    s[f"{name}_pnl"] = round(s.get(f"{name}_pnl", 0.0) + bet, 4)
+                    ts, ps = self.curves.setdefault(name, (array("d"), array("d")))     # the same bet, for the graph
+                    ts.append(self._rec_time(rec))
+                    ps.append(bet)
                     if self._rec_time(rec) >= MODEL_REGISTERED.get(name, 0):     # the forward record
                         s[f"{name}_fwd_called"] = s.get(f"{name}_fwd_called", 0) + 1
                         s[f"{name}_fwd_correct"] = s.get(f"{name}_fwd_correct", 0) + int(side == win)
                     self._run_step(name, side == win, self._rec_time(rec))
                     if name in self.ladders and self._rec_time(rec) >= self.since:
-                        self._ladder_step(self.ladders[name], rec, side)
+                        self._ladder_step(self.ladders[name], rec, side, pools=name in POOL_BOOKED)
         if not result:
             return
         self.recent.append(result[0])
@@ -1805,28 +2466,35 @@ class AutoTrader:
 
     def _model_calls(self, rec: dict) -> dict:
         """What every model called in a settled round (None = no call), from the record."""
-        pred, m = rec.get("pred") or {}, rec.get("mhh") or {}
-        sign = _sign_call(pred)
-        calls = {"time": pred.get("time_call"),
-                 "sign": sign,
-                 "mhh": m.get("call"),
-                 "mhh_hi": m.get("call") if m.get("conf", 0) >= self.flow_model.q75 else None,
-                 "agree": sign if sign and sign == m.get("call") else None,
-                 "mom": _mom_call(rec.get("feat")),
-                 "book": _book_call(rec.get("feat")),
-                 "bookmom": _bookmom_call(rec.get("feat")),
-                 "momvol": _momvol_call(rec.get("feat")),
-                 "revert": _revert_call(rec.get("feat")),
+        calls = {"revert": _revert_call(rec.get("feat")),
                  "overshoot": _overshoot_call(rec.get("feat")),
                  "prob": ProbModel.side(rec.get("prob")),
-                 "gbm": ProbModel.side(rec.get("prob_gbm")),
                  "ens": ProbModel.side(rec.get("prob_ens")),
                  "overshoot_book": _overshoot_call(rec.get("feat"), with_book=True),
-                 "jump": _jump_call(rec.get("feat")),
                  "overshoot_rel": _overshoot_rel_call(rec.get("feat")),
+                 "fade": _fade_call(rec.get("feat")),
+                 # the new price: only rounds read with the recipe that is loaded now (a refit starts its record again)
+                 "fade_fair": (_fade_fair_call(rec.get("feat")) if self.fair_v
+                               and (rec.get("feat") or {}).get("fair_v") == self.fair_v else None),
+                 "fade_strict": _fade_strict_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["fade_strict"] else None,
                  # the tree model was fitted on the older rounds: only rounds after that count
                  "trees_mid": _treesmid_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["trees_mid"] else None,
+                 "fade_flow": _fade_flow_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["fade_flow"] else None,
+                 "fade_flow2": _fade_flow2_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["fade_flow2"] else None,
+                 "fade_hawkes": (_fade_hawkes_call(rec.get("feat"), rec.get("pred"))
+                                 if self._rec_time(rec) >= MODEL_REGISTERED["fade_hawkes"] else None),
+                 # the payout rule was chosen on the rounds before its time: only later rounds count
+                 "thin": _thin_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["thin"] else None,
+                 # fitted and chosen on the rounds before its time: only later rounds count
+                 "value": _value_call(rec.get("feat")) if self._rec_time(rec) >= MODEL_REGISTERED["value"] else None,
                  "pool": (rec.get("pool") or _pool_call(rec.get("payouts")) or {}).get("call")}
+        ob = rec.get("ob") or {}
+        for name, key in OB_ANSWER.items():
+            if name in OB_FITTED:   # the fitted ones: only rounds answered by the version that is in place now
+                counted = ob.get("v") and ob.get("v") == self.ob_v
+            else:                   # HawkesSign: the six-market forecast, and no round from before it
+                counted = self._rec_time(rec) >= MODEL_REGISTERED[name]
+            calls[name] = _ob_side((ob.get("p") or {}).get(key), (ob.get("thr") or {}).get(key)) if counted else None
         return calls
 
     def _load_log(self) -> None:
@@ -1999,65 +2667,52 @@ class AutoTrader:
             + (f'<div class="sq" title="last rounds, newest left">{winners}</div>' if winners else "") + '</div>')
 
         # ---- the call: what the BET card says before / without a call ----
-        call, p, m = rec.get("call"), rec.get("pred") or {}, rec.get("mhh") or {}
-        mhh = self.model in ("mhh", "agree")                      # these call at MHH's time, 2 s before cutoff
-        lead_s = (self.flow_model.lead_ms if mhh else self.cfg.auto_lead_ms) / 1000
+        call, p = rec.get("call"), rec.get("pred") or {}
+        lead_s = self.cfg.auto_lead_ms / 1000
         if not self.on:
             sub = "auto is off"
         elif call:
-            if self.model == "agree":
-                sub = f"both say {call}: Sign P(up) {p.get('sign_p_up', 0):.2f} &middot; MHH P(up) {m.get('p_up', 0):.3f}"
-            elif mhh:
-                sub = f"MHH P(up) {m.get('p_up', 0):.3f} &middot; conf {m.get('conf', 0):.3f}"
-            elif self.model == "mom":
-                sub = f"our price moved {((rec.get('feat') or {}).get('our_mom5') or 0):+.2f} $ in the last 5 s"
-            elif self.model == "book":
-                sub = f"Binance book imbalance {((rec.get('feat') or {}).get('obi20') or 0):+.2f} (calls at |x| &ge; {BOOK_MIN})"
-            elif self.model == "bookmom":
+            if self.model in ("fade", "overshoot_rel", "fade_strict", "fade_fair", "fade_flow", "fade_hawkes", "fade_flow2"):
                 f_ = rec.get("feat") or {}
-                sub = (f"book {(f_.get('obi20') or 0):+.2f} &middot; price 5 s {(f_.get('our_mom5') or 0):+.2f} $ "
-                       f"(both the same way, book &ge; {BOOK_MIN})")
-            elif self.model in ("prob", "gbm", "ens"):
-                key = {"prob": "prob", "gbm": "prob_gbm", "ens": "prob_ens"}[self.model]
+                vol_ = max(f_.get("vol60") or 0, FADE_VOL_FLOOR if self.model == "fade_strict" else 1e-9)
+                gap_ = f_.get("dev_fair" if self.model == "fade_fair" else "dev_tick") or 0
+                sub = (f"bc.game {gap_:+.2f} $ from the {'new price' if self.model == 'fade_fair' else 'market'} &middot; "
+                       f"{abs(gap_) / vol_:.1f} x volatility"
+                       + (f" &middot; HawkesSign P(up) {p.get('sign_p_up', 0):.2f}" if self.model == "fade_hawkes" else ""))
+            elif self.model == "thin":
+                f_ = rec.get("feat") or {}
+                sub = f"the smaller pool: the page pays x{max(f_.get('pay_up') or 0, f_.get('pay_dn') or 0):.2f} on it"
+            elif self.model == "value":
+                f_ = rec.get("feat") or {}
+                vr = _value_read(f_)
+                sub = (f"chance {vr[1]:.0%} &times; pays x{f_['pay_up' if vr[0] == 'UP' else 'pay_dn']:.2f} = {vr[2]:+.0%} "
+                       f"expected &middot; gap {abs(f_['dev_tick']) / f_['vol60']:.1f} x volatility" if vr else "chance x payout")
+            elif self.model in OB_MODELS:
+                ob_ = rec.get("ob") or {}
+                p_ = (ob_.get("p") or {}).get(OB_ANSWER[self.model])
+                sub = ((f"P(UP) {p_:.3f}" if isinstance(p_, float) else "P(UP) ?")
+                       + (f" &middot; fit {ob_.get('v')}" if self.model in OB_FITTED else
+                          f" &middot; {len((ob_.get('hk') or {}).get('per') or {})} of 6 order books"))
+                if self.model == "ob_steady":
+                    sub = _steady_text(ob_.get("life"))
+            elif self.model in ("prob", "ens"):
+                key = {"prob": "prob", "ens": "prob_ens"}[self.model]
                 mg = ProbModel.side.__defaults__[0]
                 sub = (f"P(UP) {rec[key]:.2f} (calls outside {0.5 - mg:.2f}-{0.5 + mg:.2f})"
                        if isinstance(rec.get(key), float) else "P(UP) models " + ("ready" if self.prob.model else "not fitted yet"))
             else:
                 sub = f"HawkesSign P(up) {p.get('sign_p_up', 0):.2f}"
-        elif mhh and self.flow.arrays(31) is None:
-            sub = "warming up: waiting for 31 s of Binance flow"
-        elif self.model == "sign" and not self.pred.ready:
+        elif self.model == "fade_hawkes" and not self.pred.ready:
             sub = f"warming up: order-book data {self.pred.data_span():.0f} / 300 s"
+        elif self.model in OB_MODELS and rec.get("skip"):
+            sub = html.escape(str(rec["skip"]))
         elif status == BETTING:
             sub = f"call {lead_s:g} s before bets close"
         else:
             sub = "no call this round"
 
-        # ---- OB · top 20 levels: Binance BTCUSDT book imbalance, as on the MHH dashboard ----
-        bk = self.book
-        v = bk.obi20
-        side_cls = "up" if v >= 0.2 else "down" if v <= -0.2 else ""
-        color = "#22d27a" if v >= 0.2 else "#ff5468" if v <= -0.2 else "#c3ccd8"
-        words = ("balanced book" if abs(v) < 0.2 else ("strongly " if abs(v) >= 0.6 else "")
-                 + ("bid-heavy &middot; buyers stacked" if v > 0 else "ask-heavy &middot; sellers stacked"))
-        fill = (f"left:50%;width:{v * 50:.1f}%;background:#22d27a" if v >= 0 else
-                f"left:{50 + v * 50:.1f}%;width:{-v * 50:.1f}%;background:#ff5468")
-        hist = [h for _, h in list(bk.hist)[-120:]]
-        sw, sh = 212, 40
-        spark = ""
-        if len(hist) >= 2:
-            pts = " ".join(f"{i * sw / (len(hist) - 1):.1f},{sh / 2 - h * sh / 2 * 0.92:.1f}" for i, h in enumerate(hist))
-            spark = (f'<svg class="spark" viewBox="0 0 {sw} {sh}" preserveAspectRatio="none">'
-                     f'<line x1="0" y1="{sh / 2}" x2="{sw}" y2="{sh / 2}" stroke="#5b6573" stroke-dasharray="3 3"/>'
-                     f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="1.6"/></svg>')
-        ob_card = (
-            f'<div class="c {"ob" + side_cls if side_cls else ""}"><div class="ct"><span>OB &middot; TOP 20 LEVELS</span>'
-            f'<span class="mute">{"live" if bk.connected else "reconnecting"}</span></div>'
-            f'<div class="big {side_cls}">{v * 100:+.1f}%</div><div class="obw {side_cls}">{words}</div>'
-            f'<div class="obbar"><i style="{fill}"></i></div>'
-            f'<div class="two mute sm"><span>asks -100%</span><span>0</span><span>bids +100%</span></div>{spark}'
-            f'<div class="two mute sm"><span>L1 {bk.obi1:+.2f} &middot; L1-5 {bk.obi5:+.2f}</span><span>last 2 min</span></div>'
-            '</div>')
+        # ---- the order books: the five markets' best-price reading, its age, and what it was at the decision ----
+        ob_card = self._ob_card()
 
         # ---- BET, like the MHH dashboard: "next $X" until the call, then "UP $X" / "DN $X" with what it pays,
         # then WON / LOST; the next stake follows the progression (x2: doubles after each loss, back to base on a win)
@@ -2090,7 +2745,11 @@ class AutoTrader:
             bet_line = (f'{"Up" if call == "UP" else "Down"} Wins {f"{pay * 100:.0f}%" if pay else "&ndash;"}{state}'
                         + (' <span class="tag">REAL</span>' if lv.get("ok") else
                            ' <span class="tag">real order failed</span>' if lv.get("error") else ""))
-            if result == "WIN" and gain is not None:
+            exact = (_pool_pay(rec, call, stake) if rec.get("by") in POOL_BOOKED and result == "WIN" and not lv.get("ok")
+                     else None)                       # thin's and value's paper books: the final pools with our stake in them
+            if exact:
+                note = f"booked x{exact:.2f} at the final pools on ${amt(stake)} &rarr; {usd(stake * (exact - 1))}"
+            elif result == "WIN" and gain is not None:
                 note = f"booked {pay * 100:.0f}% on ${amt(stake)} &rarr; {usd(gain)}"
             elif result == "LOSS":
                 note = f"lost {usd(-stake)}"
@@ -2140,7 +2799,11 @@ class AutoTrader:
                 money = f'{x.get("live_pnl", x.get("pnl", 0.0)):+.2f} <span class="tag">REAL ${xlv.get("stake", 0):g}</span>'
             else:                                 # paper: at the stake the ladder bet that round
                 xstake = x.get("stake", base)
-                money = (f'{x.get("pnl", 0.0) * xstake / base:+.2f} <span class="tag ptag">${xstake:g}</span>'
+                xpay = 1 + x.get("pnl", 0.0) / base
+                if x["result"] == "WIN" and xpay > 1:      # as the P&L counts it: our own stake lowers the payout
+                    xpay = ((x.get("by") in POOL_BOOKED and _pool_pay(x, x["call"], xstake))  # thin, value: the final pools,
+                            or _diluted(xpay, xstake, x.get("pools"), x["call"]))            # as its ladder books it
+                money = (f'{xstake * (xpay - 1):+.2f} <span class="tag ptag">${xstake:g}</span>'
                          + (' <span class="tag">failed</span>' if xlv.get("error") else ""))
             return (f'<div class="res {cls_}"><span class="sd">{side}&rarr;{winner}</span><b>{x["result"]}</b>'
                     f'<span class="m">{money}</span></div>')
@@ -2157,11 +2820,11 @@ class AutoTrader:
                 f"STOPPED: {e(self.stop_reason or '')}" if self.state == "STOPPED" else "real orders off")
         clk = self.clock.dict()
         safety = (f'<div class="mute">real stake ${self.stake():g} &middot; '
-                  + ("compensate " + "-".join(f"{x * c.auto_stake_usd:g}" for x in c.auto_real_ladder) + " ON"
+                  + ("compensate " + "-".join(f"{x * c.auto_stake_usd:g}" for x in self._real_ladder()) + " ON"
                      if self.ladder_on() else "flat" + (" (ladder waits for the gate)" if len(c.auto_real_ladder) > 1 else ""))
                   + '</div>'
                   f'<div class="mute">real losses in a row <b>{self.real_run}</b> / {c.auto_max_real_run} &middot; '
-                  f'orders today {self.attempts_today} / {c.auto_max_real_bets_day} &middot; '
+                  f'orders today {self.attempts_today}{f" / {c.auto_max_real_bets_day}" if c.auto_max_real_bets_day else ""} &middot; '
                   f'budget left ${self.budget_left():.2f}</div>'
                   f'<div class="mute">campaign {usd(self.campaign_pnl)} (stop -${c.auto_campaign_loss_usd:g}) &middot; '
                   f'balance {f"${self.balance_usd:,.2f}" if self.balance_usd is not None else "&ndash;"} &middot; '
@@ -2170,11 +2833,11 @@ class AutoTrader:
                      f'&middot; longest {self.shadow_longest_today} &middot; stops {self.shadow_stops_today}</div>'
                      if c.auto_shadow and not self.armed else ""))
         pnl_card = (
-            f'<div class="c"><div class="ct"><span>P&amp;L &middot; {plabel}</span><span class="mute">since {since}</span></div>'
+            f'<div class="c pnlc"><div class="ct"><span>P&amp;L &middot; {plabel}</span><span class="mute">since {since}</span></div>'
             f'<div class="two mute"><span>paper P&amp;L</span><span>bets &middot; won</span></div>'
             f'<div class="two"><b class="pnl {"pos" if pnl >= 0 else "neg"}">{usd(pnl)}</b>'
             f'<b class="pnl">{bets} &middot; {won}</b></div>'
-            f'<div class="mute">at page payouts {usd(lad.get("pnl_shown", 0.0))} &middot; flat $1 {usd(lad.get("flat", 0.0))}'
+            f'<div class="mute">before our stake lowers the payout {usd(lad.get("pnl_shown", 0.0))} &middot; flat $1{usd(lad.get("flat", 0.0))}'
             + (f' &middot; won {won / bets:.1%}' if bets else "") + '</div>'
             f'<div class="ph" style="margin-top:3px">next bet ${amt(nxt_after)} &middot; losses in a row {step} &middot; '
             f'run lost ${amt(run_lost)} &middot; longest {longest}</div>'
@@ -2191,12 +2854,15 @@ class AutoTrader:
 
         mix_n, mix_ok = s.get("mix_n", 0), s.get("mix_ok", 0)
         models_card = (
-            '<div class="c"><div class="ct"><span>MODELS</span><span class="mute">right &middot; flat $1 P&amp;L</span></div>'
-            + model_row("sign", "HawkesSign") + model_row("time", "HawkesTime") + model_row("mhh", "MHH flow")
-            + model_row("agree", "Sign+MHH agree") + model_row("mom", "Momentum 5s") + model_row("book", "Strong book") + model_row("bookmom", "Book + trend") + model_row("momvol", "Mom, volatile") + model_row("revert", "Quiet reversal") + model_row("overshoot", "Overshoot") + model_row("overshoot_book", "Overshoot+book") + model_row("prob", "P(UP) model") + model_row("gbm", "P(UP) trees") + model_row("ens", "P(UP) ensemble") + model_row("jump", "Jump follow") + model_row("trees_mid", "Trees, medium") + model_row("overshoot_rel", "Overshoot, scaled")
+            '<div class="c modc"><div class="ct"><span>MODELS</span><span class="mute">right &middot; flat $1 P&amp;L</span></div>'
+            + "".join(model_row(name, {"trees_mid": "Trees, medium", "overshoot_book": "Overshoot+book",
+                                       "fade_fair": "Fade, new price", "ob_logit": "OB logistic", "ob_lgbm": "OB LightGBM",
+                                       "ob_xgb": "OB XGBoost", "ob_deeplob": "OB DeepLOB"}.get(name, label))
+                      for name, label in self.MODELS.items())
             + row("our price wrong", f"{(mix_n - mix_ok) / mix_n:.1%} of {mix_n}" if mix_n else "&ndash;") + '</div>')
+        lab_card = lab_panel_card(read_lab_status(self.cfg.auto_log.parent))
         return (f'{PANEL_CSS}<div class="p"><div class="hd"><span>BC BOT &middot; ROUND #{rid or "&ndash;"}</span>{mode}</div>'
-                f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{models_card}</div>')
+                f'{round_card}{ob_card}{bet_card}{results_card}{pnl_card}{lab_card}{models_card}</div>')
 
     def curve_data(self) -> dict:
         """What the page needs to draw our price on bc.game's chart: our last 75 s, the last ticks (the page finds
@@ -2228,6 +2894,9 @@ class AutoTrader:
             "now": now,
             "bc": last(self.bc_ticks),
             "our": self.our.series(cut, now),         # our price: the weighted, delayed exchange mix (ourprice.py)
+            "fair": self._fair_series(cut, now),      # the separate new price (None: no recipe)
+            "fair_info": self.fair_info(),
+            "fair_problem": self.fair_problem,        # a recipe file is there and was refused at the start: why
             "exchanges": self.our.exchange_series(cut, now) if exchanges else None,
             "mix": {k: {"label": self.ex_feeds[k].name, "weight": w, "lag": lag,
                         "gap": round(self.our.gaps().get(k, float("nan")), 2), "live": bool(self.ex_feeds[k].connected)}
@@ -2243,9 +2912,62 @@ class AutoTrader:
                         "our_move": rec.get("mix_move", rec.get("our_move"))}
                        for rec in list(self.recs.values()) if rec.get("start") and rec.get("end", 0) >= cut],
             # how often our price gave a different Up/Down from bc.game (all logged rounds)
-            "our_vs_bc": {f"{p}{k}": self.stats.get(f"{p}{k}", 0) for p in ("our", "mix") for k in
+            "our_vs_bc": {f"{p}{k}": self.stats.get(f"{p}{k}", 0) for p in ("our", "mix", "fair") for k in
                           ("_n", "_ok", "_flat", "_small_n", "_small_ok", "_mid_n", "_mid_ok", "_big_n", "_big_ok")},
         }
+
+    PNL_RANGES = {"1h": 3600.0, "6h": 21600.0}        # the graph's ranges by the clock; "today" and "all" besides
+
+    def pnl_curve(self, rng: str = "all", model: str | None = None, max_pts: int = 1200) -> dict:
+        """The page's P&L graph: one model's paper bets (the calling model unless another is named) as a running
+        total, and the real orders of the same time as a second one; both start at 0 at the left edge.  The paper
+        bets are the ones its row in the Models table counts, at the same amounts: with "all" (since the row
+        began) the line ends at the row's P&L.  rng: "1h", "6h", "today" (since this PC's midnight, like the losing
+        runs) or "all".  The real orders are every real order of that time as the bot booked it, whichever model
+        placed them (the round log does not name the calling model)."""
+        name = model if model in self.MODELS or model == "pool" else self.model
+        now = time.time()
+        ts, ps = self.curves.get(name) or ((), ())
+        if rng in self.PNL_RANGES:
+            cut = now - self.PNL_RANGES[rng]
+        elif rng == "today":
+            lt = time.localtime(now)
+            cut = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        else:
+            rng, cut = "all", (ts[0] - 1.0 if len(ts) else now)
+        i = bisect.bisect_left(ts, cut)
+        real = sorted(p for p in self.real_pts if p[0] >= cut)
+        return {"model": name, "range": rng, "from": round(cut, 1), "now": round(max(now, cut), 1),
+                "paper": _running(ts[i:], ps[i:], max_pts),
+                "real": _running([p[0] for p in real], [p[1] for p in real], max_pts)}
+
+    def _fair_series(self, cut: float, now: float) -> list | None:
+        """The new price's curve for the chart.  An error in it must not take the rest of the chart's answer along."""
+        if self.fair is None:
+            return None
+        try:
+            return self.fair.series(cut, now)
+        except Exception as e:                                # noqa: BLE001
+            if not self._fair_warned:
+                self._fair_warned = True
+                log.warning("new price curve: %r (said once)", e)
+            return []
+
+    def fair_info(self) -> dict | None:
+        """The separate new price for the page: its recipe, its feeds, and how it did against our price on the rounds
+        both have (same Up/Down as bc.game).  None while there is no recipe."""
+        r = self.fair_recipe
+        if not r:
+            return None
+        s = self.stats
+        return {"version": r["version"], "registered": r["registered"], "fitted_utc": r.get("fitted_utc"),
+                "level_window": r["level_window"],
+                # live: the socket is open (as for our price's chips); fresh: it has a price a snapshot would use
+                "mix": {k: {"label": self.fair_feeds[k].name, "weight": w, "lag": lag,
+                            "live": bool(self.fair_feeds[k].connected),
+                            "fresh": self.fair_feeds[k].age() <= STALE_SNAPSHOT} for k, (w, lag) in r["mix"].items()},
+                "same_rounds": {"n": s.get("cmp_n", 0), "new_ok": s.get("cmp_fair_ok", 0),
+                                "current_ok": s.get("cmp_mix_ok", 0)}}
 
     def _ladder_text(self) -> str:
         lad = self.ladders.get(self.model)
@@ -2261,8 +2983,10 @@ class AutoTrader:
         rec = self.recs.get(int((self.round or {}).get("id") or 0)) or {}
         return {
             "on": self.on, "live": self.armed, "live_wanted": self.armed,
+            "startup_problem": getattr(self, "startup_problem", None),
             # ---- real money: the state machine and every counter it is judged by ----
             "state": self.state, "stop_reason": self.stop_reason, "tech_stop": self.tech_stop,
+            "stop_text": self.stop_text(), "stopped_at": self.stopped_at or None,
             "armed_at": self.armed_at or None, "rearm_grant": self.rearm_grant, "rearms": self.rearms,
             "real_run": self.real_run, "max_real_run": c.auto_max_real_run,
             "real_run_longest_today": self.real_run_longest_today,
@@ -2272,7 +2996,7 @@ class AutoTrader:
             "budget_left": round(self.budget_left(), 4),
             "campaign_pnl": round(self.campaign_pnl, 4), "campaign_since": self.campaign_since or None,
             "run_reset_at": self.run_reset_at or None,
-            "campaign_loss_usd": c.auto_campaign_loss_usd,
+            "campaign_loss_usd": c.auto_campaign_loss_usd, "arm_ttl_h": c.auto_arm_ttl_h,
             "balance": self.balance, "balance_currency": self.balance_currency, "balance_usd": self.balance_usd,
             "balance_age": round(time.time() - self.balance_at, 1) if self.balance_at else None,
             "balance_account": self.balance_account, "dialog": self.dialog,
@@ -2280,7 +3004,8 @@ class AutoTrader:
             "pending": list(self.pending_real), "unknown": self.unknown, "last_order": self._last_order,
             "events": list(self.events), "gate": self.gate_status(), "break_even": self.BREAK_EVEN,
             "live_allowed": c.live_allowed, "tos_risk_accepted": c.tos_risk_accepted,
-            "real_ladder": list(c.auto_real_ladder), "ladder_on": self.ladder_on(), "next_real_stake": self.stake(),
+            "real_ladder": list(self._real_ladder()), "ladder_on": self.ladder_on(), "next_real_stake": self.stake(),
+            "max_stake_usd": self.stake_cap(), "stake_usd": c.auto_stake_usd,
             "ladder_forced": self.ladder_forced,
             "shadow": {"on": c.auto_shadow, "run": self.shadow_run, "attempts_today": self.shadow_attempts_today,
                        "longest_today": self.shadow_longest_today, "stops_today": self.shadow_stops_today,
@@ -2292,6 +3017,7 @@ class AutoTrader:
             # each model's losing runs over all logged rounds: {"lengths": {run length: how many}, "current", ...}
             "runs": self.runs,
             "runs_today": self.runs_today,
+            "runs_days": {d: self.runs_days[d] for d in sorted(self.runs_days)[-7:]},
             "feed": {"connected": self.feed.connected, "msgs": self.feed.msgs, "data_s": round(self.pred.data_span()),
                      "events": len(self.feed.ev_time), "mid": self.feed.mid},
             "models_ready": self.pred.ready, "models": self.pred.info,
@@ -2300,8 +3026,9 @@ class AutoTrader:
             "bitfinex_agrees_with_bc": round(s["bfx_agree"] / s["bfx_n"], 4) if s["bfx_n"] else None,
             "records": {name: {"called": s.get(f"{name}_called", 0), "correct": s.get(f"{name}_correct", 0),
                                "pnl": s.get(f"{name}_pnl", 0.0)}
-                        for name in ("time", "sign", "mhh", "mhh_hi", "agree", "mom", "book", "bookmom", "momvol", "revert", "overshoot", "overshoot_book", "prob", "gbm", "ens", "jump", "trees_mid", "overshoot_rel", "pool")},
-            "prob_model": self.prob.info(),
+                        for name in (*self.MODELS, "pool")},
+            "ob": {**self.ob_info, "counted_version": self.ob_v},
+            "prob_model": self.prob.info(), "fair_price": self.fair_info(),
             "stats": s, "last": self.last,
         }
 
@@ -2325,7 +3052,7 @@ class AutoTrader:
         return (f"real orders {self.state}{' (' + self.stop_reason + ')' if self.stop_reason else ''}"
                 f"{' - needs: live clear ' + self.tech_stop if self.tech_stop else ''} | losses in a row {self.real_run}"
                 f"/{c.auto_max_real_run}{' (one order per re-arm)' if self.real_run >= c.auto_max_real_run else ''} | "
-                f"orders today {self.attempts_today}/{c.auto_max_real_bets_day}, real today {self.day_live_pnl:+.2f}, "
+                f"orders today {self.attempts_today}{f'/{c.auto_max_real_bets_day}' if c.auto_max_real_bets_day else ''}, real today {self.day_live_pnl:+.2f}, "
                 f"budget left ${self.budget_left():.2f} | campaign {self.campaign_pnl:+.2f} (stop -${c.auto_campaign_loss_usd:g}) | "
                 f"balance {f'${self.balance_usd:.2f}' if self.balance_usd is not None else '?'} "
                 f"({self.balance_account or '?'}) | clock {'bc ' + f'{clk["offset"]:+.2f}s' if clk['ok'] else 'exchange: ' + str(clk['why'])} | "

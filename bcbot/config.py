@@ -29,10 +29,8 @@ class Config:
     max_usd: float               # the most one manual order may be worth (real stakes above ~$5 dilute the payout)
     window_wait: float
     log_file: Path
-    auto_model: str              # which model makes the calls: "sign" (HawkesSign), "mhh" (the MHH bot's
-                                 # Binance-flow logit), or "agree" (only rounds where HawkesSign and MHH call the
-                                 # same side); HawkesTime ("time") is scored but can't call
-    flow_model: Path             # the MHH model file
+    auto_model: str              # which model makes the calls: one of AutoTrader.CALLERS ("fade", "overshoot",
+                                 # "prob", "sign" = HawkesSign, ...); an unknown name falls back to "sign"
     auto_lead_ms: int            # decide this long before betting closes (on bc.game's clock)
     auto_stake_usd: float        # the real base stake per round
     auto_real_ladder: tuple      # AUTO_REAL_LADDER, e.g. "1,2": real stake = base x the step for the current run of
@@ -47,10 +45,12 @@ class Config:
     tos_risk_accepted: bool      # TOS_RISK_ACCEPTED=1: the user accepts that bc.game's terms forbid bots
     auto_max_real_run: int       # real losses in a row at which the bot stops and disarms (only a real WIN resets it)
     auto_rearm_cooloff_min: float  # minutes after a losses-in-a-row stop before a re-arm is accepted
-    auto_arm_ttl_h: float        # an arming expires after this many hours (the operator must be present)
+    auto_arm_ttl_h: float        # an arming expires after this many hours; 0 = no time limit (the owner's
+                                 # decision, 2026-11-12: LIVE stays on until Paper is pressed or a stop is hit)
     auto_max_stake_usd: float    # the most the automatic path may stake per round
-    auto_min_bankroll_stakes: int  # no real order unless the balance is at least this many stakes
-    auto_max_real_bets_day: int  # real order attempts per calendar day (placed, rejected and unknown all count)
+    auto_min_bankroll_stakes: int  # no real order unless the balance is at least this many stakes (0 = off: the
+                                   # balance only has to cover the order's own stake; the owner's decision, 2026-11-12)
+    auto_max_real_bets_day: int  # real order attempts per calendar day (0 = no limit, the default since 2026-11-10)
     auto_campaign_loss_usd: float  # cumulative real loss since the first arming at which live is over for good
     auto_send_margin_s: float    # never click later than this before the cutoff, on bc.game's clock
     auto_balance_max_age_s: float  # the balance must have been read this recently before an order
@@ -60,6 +60,7 @@ class Config:
     auto_late_snapshot_s: float  # the second feature snapshot (paper research), this long before the cutoff
     auto_mid_snapshot_s: float   # a snapshot between the two (paper research): what a later decision would have seen
     auto_shadow: bool            # run every real-order check on paper and log what the bot would have done
+    auto_ob_url: str             # the order-book service (tools/ob_server.py) asked at each decision; empty = off
     auto_page_curve: bool        # draw our price curve on bc.game's own Up/Down chart
     auto_resume_arm: bool        # an arming that was live when the process ended goes on after a restart
     auto_state_file: Path        # the real-loss counter and campaign, kept across restarts
@@ -100,7 +101,6 @@ def load() -> Config:
         window_wait=float(os.getenv("WINDOW_WAIT", "45")),
         log_file=_path("TRADE_LOG", "logs/trades.jsonl"),
         auto_model=os.getenv("AUTO_MODEL", "sign").strip().lower(),
-        flow_model=_path("FLOW_MODEL", "models/flow5s_logit.json"),
         auto_lead_ms=int(os.getenv("AUTO_LEAD_MS", "3000")),
         auto_stake_usd=float(os.getenv("AUTO_STAKE_USD", "1")),
         auto_real_ladder=tuple(float(x) for x in (os.getenv("AUTO_REAL_LADDER") or "1").replace(" ", "").split(",")
@@ -113,10 +113,10 @@ def load() -> Config:
         tos_risk_accepted=_flag("TOS_RISK_ACCEPTED"),
         auto_max_real_run=int(os.getenv("AUTO_MAX_REAL_RUN", "5")),
         auto_rearm_cooloff_min=float(os.getenv("AUTO_REARM_COOLOFF_MIN", "15")),
-        auto_arm_ttl_h=float(os.getenv("AUTO_ARM_TTL_H", "4")),
+        auto_arm_ttl_h=float(os.getenv("AUTO_ARM_TTL_H", "0")),
         auto_max_stake_usd=float(os.getenv("AUTO_MAX_STAKE_USD", "5")),
-        auto_min_bankroll_stakes=int(os.getenv("AUTO_MIN_BANKROLL_STAKES", "20")),
-        auto_max_real_bets_day=int(os.getenv("AUTO_MAX_REAL_BETS_DAY", "60")),
+        auto_min_bankroll_stakes=int(os.getenv("AUTO_MIN_BANKROLL_STAKES", "0")),
+        auto_max_real_bets_day=int(os.getenv("AUTO_MAX_REAL_BETS_DAY", "0")),
         auto_campaign_loss_usd=float(os.getenv("AUTO_CAMPAIGN_LOSS_USD", "40")),
         auto_send_margin_s=float(os.getenv("AUTO_SEND_MARGIN_S", "1.5")),
         auto_balance_max_age_s=float(os.getenv("AUTO_BALANCE_MAX_AGE_S", "20")),
@@ -126,6 +126,7 @@ def load() -> Config:
         auto_late_snapshot_s=float(os.getenv("AUTO_LATE_SNAPSHOT_S", "1.4")),
         auto_mid_snapshot_s=float(os.getenv("AUTO_MID_SNAPSHOT_S", "2.2")),
         auto_shadow=_flag("AUTO_SHADOW", "1"),
+        auto_ob_url=os.getenv("AUTO_OB_URL", "http://127.0.0.1:8766/ob").strip(),
         auto_page_curve=_flag("AUTO_PAGE_CURVE", "1"),
         auto_resume_arm=_flag("AUTO_RESUME_ARM", "1"),
         auto_state_file=_path("AUTO_STATE_FILE", "logs/live_state.json"),

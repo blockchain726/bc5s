@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "purpose": "paper",
+  "family": "raw",
+  "features": [
+    "dev_tick",
+    "dev_chg1",
+    "bc_mom1",
+    "bc_mom2",
+    "bc_mom5",
+    "our_mom1",
+    "our_mom2",
+    "our_mom5"
+  ],
+  "fit": {
+    "scale": [
+      2.9448158795420203,
+      2.1794709513275934,
+      3.4266421085756575,
+      4.850963288625566,
+      7.642137140962784,
+      2.775213942078137,
+      4.235047574049078,
+      7.098534249387853
+    ],
+    "weights": [
+      -0.11240679257476131,
+      -0.0028190280322584363,
+      -0.060301216910921614,
+      -0.03857051186094935,
+      0.003690580937183899,
+      0.08957625221021127,
+      -0.05618488136992678,
+      0.09054958438819237
+    ]
+  },
+  "temperature": 0.3431273403406007,
+  "threshold": 0.56,
+  "validation_status": "no demonstrated confident edge",
+  "live_ready": false,
+  "created_utc": "2026-11-11T15:19:45+00:00",
+  "forward_after": 1794410445.809282,
+  "data": {
+    "snapshot_bytes": 36560608,
+    "snapshot_sha256": "98e5ba27d91d24ee242e63ba19b85722fe48c400f4d8a4336aa0b2db9021a3a7",
+    "raw_unique_records": 14507,
+    "usable_rows": 9324,
+    "excluded": {
+      "old_log_version": 3929,
+      "missing_stale_or_invalid_features": 1254
+    }
+  },
+  "protocol": {
+    "train_fraction": 0.65,
+    "calibration_fraction": 0.15,
+    "test_fraction": 0.2,
+    "families": [
+      "gap",
+      "raw",
+      "normalized",
+      "flow"
+    ],
+    "penalties": [
+      10.0,
+      100.0,
+      1000.0
+    ],
+    "cv_folds": 3,
+    "purge_seconds": 60.0,
+    "selection": "chronological CV log loss; one standard error; prefer fewer features then stronger ridge",
+    "calibration": "one nonnegative temperature, [0, 2], fitted on calibration block only",
+    "primary_threshold": 0.56,
+    "bootstrap_hour_blocks": 1,
+    "bootstrap_samples": 5000,
+    "seed": 726,
+    "target": "BC end_price > start_price over the recorded approximately 5-second window",
+    "payout": "1 + 0.9415 * opposite_final_pool / (own_final_pool + 1), flat hypothetical $1",
+    "evidence_rule": "prospective only: >=3000 selected calls, >=7 UTC dates, Wilson95 lower >51.55%, hourly-block ROI95 lower >0"
+  },
+  "code_sha256": "131ba50111200be925e3048d0377681ee275553b17ababc4d2b88fc1d170d7aa",
+  "evaluator_sha256": "38f78d9a91fb504f3a5dbb83cab5246cc95d464b48ab2956aaa9134deb127115"
+}

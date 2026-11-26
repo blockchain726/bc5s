@@ -54,7 +54,9 @@ Tap stake and mode set from the page are kept.
 ## 5. Arming and the Tap
 
 - Up/Down dashboard: paste `API_TOKEN` from `.env` into the token box once, then **ARM real** (tick **compensate
-  ladder** first for the $1 / $2 ladder). `losses -> 0` resets the run of real losses.
+  ladder** first for the $1 / $2 ladder). `losses -> 0` resets the run of real losses. After a technical stop (the
+  wallet on bc.game changed currency, an order with an unknown result, ...) the page shows **Clear stop**: check
+  bc.game, press it, then **LIVE** again (pressing LIVE while stopped opens the same dialog first).
 - Tap page: the same token box, then **REAL** at the stake in the box. **OFF** ends it; `clear stop` clears a
   technical stop; the budget stop (`TAP_BUDGET_USD`) does not clear.
 

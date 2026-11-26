@@ -20,7 +20,7 @@ def make_cfg(tmp_path: Path, **over) -> config.Config:
     fields = {k: getattr(base, k) for k in base.__dataclass_fields__}
     fields.update(auto_log=tmp_path / "auto_rounds.jsonl", log_file=tmp_path / "trades.jsonl",
                   auto_state_file=tmp_path / "live_state.json", auto_events=tmp_path / "live_events.jsonl",
-                  auto_kill_file=tmp_path / "KILL", flow_model=ROOT / "models" / "flow5s_logit.json",
+                  auto_kill_file=tmp_path / "KILL",
                   live_allowed=True, tos_risk_accepted=True, auto_model="sign")
     fields.update(over)
     return config.Config(**fields)
@@ -36,7 +36,8 @@ class FakeTrader:
         from bcbot.trader import Status
         return Status(True, "REAL", 50.0, "USDT", "open", 10, 194, 194, 77000.0, "5s $1-50", None)
 
-    async def usd_rate(self, currency):
+    async def usd_rate(self, currency, max_age=60.0):
+        self.rate_asked = getattr(self, "rate_asked", []) + [max_age]
         return 1.0
 
 
@@ -166,14 +167,29 @@ def test_checklist_passes_then_each_rule_refuses(tmp_path):
     a.pending_real[1] = 1.0
     assert "not settled" in a._may_place(rid, rec, 1.0)
     a.pending_real.clear()
-    a.attempts_today = a.cfg.auto_max_real_bets_day
+    import dataclasses
+    a.cfg = dataclasses.replace(a.cfg, auto_max_real_bets_day=0)        # 0 (the default): no daily order count
+    a.attempts_today = 500
+    assert a._may_place(rid, rec, 1.0) is None
+    a.cfg = dataclasses.replace(a.cfg, auto_max_real_bets_day=60)
+    a.attempts_today = 60
     assert "today" in a._may_place(rid, rec, 1.0)
     a.attempts_today = 0
+    a.set_max_real_run(7, who="test")                           # the operator's own losses-in-a-row stop
+    a.real_run = 6
+    assert a._may_place(rid, rec, 1.0) is None
+    a.real_run = 7
+    assert "losses in a row (limit 7)" in a._may_place(rid, rec, 1.0)
+    a.real_run = 0
+    again = AutoTrader(FakeTrader(), dataclasses.replace(a.cfg, auto_max_real_run=5))
+    assert again.cfg.auto_max_real_run == 7                     # kept across a restart, beats .env
     a.day_live_pnl = -a.cfg.auto_daily_loss_usd + 0.5
     assert "budget" in a._may_place(rid, rec, 1.0)
     a.day_live_pnl = 0.0
-    a.balance_usd = 5.0
-    assert "below" in a._may_place(rid, rec, 1.0)
+    a.balance_usd = 5.0                                         # the 20-stakes floor is off since 2026-11-12 (the
+    assert a._may_place(rid, rec, 1.0) is None                  # owner's decision): $5 covers a $1 order
+    a.balance_usd = 0.5
+    assert a._may_place(rid, rec, 1.0) == "balance $0.50 is less than the stake $1"
     a.balance_usd = 50.0
     a.balance_at = time.time() - 60
     assert "balance not read" in a._may_place(rid, rec, 1.0)
@@ -203,6 +219,51 @@ def test_checklist_passes_then_each_rule_refuses(tmp_path):
     assert "not armed" in a._may_place(rid, rec, 1.0)
 
 
+def test_a_late_tick_or_a_refused_order_does_not_hold_the_next_order_back(tmp_path):
+    """The owner, 2026-11-17, LIVE on XGBoost: "Rounds where bc.game's price feed is stale ... The round after
+    bc.game refuses an order (45 s wait).  Remove this."  What still holds an order back: a clock that cannot time
+    it (too few ticks, none for 20 s, medians apart) and another feed being stale."""
+    a, rid, rec = checklist_trader(tmp_path)
+    assert a._may_place(rid, rec, 1.0) is None
+    a.clock.last_arrival = time.time() - 3.0                     # bc.game's last tick came 3 s ago
+    assert not a.clock.ok() and a.clock.usable() and a.clock_src() == "bc"
+    assert a._may_place(rid, rec, 1.0) is None
+    rec["feat"]["dq"] = {"ok": False, "stale": ["bc_ticks"], "held_by": []}        # as _features writes it now
+    assert a._may_place(rid, rec, 1.0) is None
+    rec["feat"]["dq"] = {"ok": False, "stale": ["bc_ticks"]}                       # a record without held_by
+    assert a._may_place(rid, rec, 1.0) is None
+    rec["feat"]["dq"] = {"ok": False, "stale": ["binance_book", "bc_ticks"], "held_by": ["binance_book"]}
+    assert a._may_place(rid, rec, 1.0) == "data quality: binance_book"             # another feed still does
+    rec["feat"]["dq"] = {"ok": True, "stale": []}
+    a._rejects.append((rid - 1, time.time()))                    # bc.game refused the order of the round before
+    assert a._may_place(rid, rec, 1.0) is None
+    for _ in range(40):                                          # no tick in the last 20 s: the clock cannot be used
+        a.clock.samples.pop()
+    assert not a.clock.usable() and "no tick in the last 20 s" in a._may_place(rid, rec, 1.0)
+    a.clock.samples.clear()
+    assert "bc.game clock not ok (only 0 ticks" in a._may_place(rid, rec, 1.0)
+
+
+def test_the_balance_read_before_a_click_does_not_wait_for_the_price_table(tmp_path):
+    """2026-11-17: in every second round the read before the click fetched bc.game's price table (0.6-1.6 s), and
+    five of 34 real orders came too late to click.  It now uses the table read with the round's preparation."""
+    from bcbot.auto import RATE_KEEP_S
+    a, rid, rec = checklist_trader(tmp_path)
+
+    async def click():
+        return {"ok": True, "sent": time.time(), "acked": time.time(), "rtt": 0.1, "order_id": "1", "round_id": str(rid),
+                "amount": 1.0, "currency": "USDT", "side": "up"}
+
+    async def run():
+        await a._prepare(0)                                   # the round's preparation: the table may be read
+        await a._send(rid, "UP", rec, 1.0, "auto", click)     # right before the click: never
+    a.trader.prepare_usd = lambda usd: asyncio.sleep(0)
+    a.state = "DISARMED"                                      # (prepare only reads the balance when not armed)
+    asyncio.run(run())
+    assert a.trader.rate_asked == [60.0, RATE_KEEP_S] and RATE_KEEP_S >= 600
+    assert rec["live"]["ok"] and a.balance_usd == 50.0
+
+
 def test_shadow_checks_run_while_disarmed(tmp_path):
     a, rid, rec = checklist_trader(tmp_path)
     a.state = "DISARMED"
@@ -227,6 +288,39 @@ def test_unmatched_trade_is_unknown_and_blocks(tmp_path):
     assert a.real_run == 1 and a.state == "DISARMED" and a.cleared == ["999"]
     a2 = trader_for(tmp_path)                         # the clearing survives a restart
     assert a2.unknown == [] and a2.real_run == 1
+
+
+def test_a_technical_stop_says_what_it_is_and_is_cleared_on_the_page(tmp_path):
+    """2026-11-17: the owner pressed LIVE and read "stopped: None. Check the site, then 'live clear currency'".  The
+    stop was five days old, its reason had been lost when Paper was pressed, and the page had no way to clear it."""
+    t0 = time.time() - 3600
+    write_rounds(tmp_path / "auto_rounds.jsonl", list("WL"), t0)
+    a = trader_for(tmp_path)
+    a.on, a.state = True, "ARMED"
+    a._hard_stop("wallet currency changed from USDT to BCD", tech="currency")
+    a.disarm("live off", who="api")                   # Paper pressed after the stop: the stop and its reason stay
+    assert a.state == "STOPPED" and a.tech_stop == "currency" and a.stop_reason == "wallet currency changed from USDT to BCD"
+    st = json.loads(a.cfg.auto_state_file.read_text(encoding="utf-8"))
+    st["stop_reason"] = None                          # a state file written before the fix: the reason is gone
+    a.cfg.auto_state_file.write_text(json.dumps(st), encoding="utf-8")
+    a2 = trader_for(tmp_path)                         # ... and is found again in the audit trail
+    assert a2.state == "STOPPED" and a2.stop_reason == "wallet currency changed from USDT to BCD"
+    a2.on = True
+    for refused in (lambda: a2.arm(a2.real_run, time.strftime("%Y-%m-%d"), force=True),
+                    lambda: a2.reset_run(a2.real_run, "new model")):
+        with pytest.raises(TradeError) as e:
+            refused()
+        text = str(e.value)
+        assert "None" not in text and "live clear" not in text
+        assert "wallet currency changed from USDT to BCD" in text and "Clear stop" in text and "wallet selected" in text
+    s = a2.summary()
+    assert s["tech_stop"] == "currency" and s["stop_text"] == text and s["stopped_at"]
+    assert "cleared" in a2.clear("currency", who="api")
+    assert a2.state == "DISARMED" and a2.tech_stop is None and a2.summary()["stop_text"] is None
+    a2.arm(a2.real_run, time.strftime("%Y-%m-%d"), force=True)        # cleared: LIVE is the owner's next click
+    assert a2.state == "ARMED"
+    a2.disarm("live off", who="api")                  # Paper without a technical stop: as before
+    assert a2.state == "DISARMED" and a2.stop_reason is None
 
 
 def test_kill_file_disarms(tmp_path):
@@ -275,19 +369,59 @@ def test_run_reset_is_typed_logged_and_kept_across_restarts(tmp_path):
     assert a2.real_run == 1 and a2.state == "ARMED"
 
 
+def trader_for_armed_message(tmp_path):
+    """What arm() answers when a time limit is set (AUTO_ARM_TTL_H=4)."""
+    t = trader_for(tmp_path, auto_resume_arm=False, auto_arm_ttl_h=4)
+    t.on = True
+    return t.arm(t.real_run, time.strftime("%Y-%m-%d"), force=True)
+
+
 def test_arming_goes_on_after_a_restart_until_it_expires(tmp_path):
     t0 = time.time() - 3600
     write_rounds(tmp_path / "auto_rounds.jsonl", list("WL"), t0)
     a = trader_for(tmp_path, auto_resume_arm=True)
     a.on = True
-    a.arm(1, time.strftime("%Y-%m-%d"), force=True, ladder=True)
+    said = a.arm(1, time.strftime("%Y-%m-%d"), force=True, ladder=True)
     assert a.state == "ARMED" and a.ladder_forced
-    a2 = trader_for(tmp_path, auto_resume_arm=True)        # a restart: the arming goes on, ladder included
+    assert a.cfg.auto_arm_ttl_h == 0 and "until you switch to Paper" in said     # the owner's decision of 2026-11-12:
+    a2 = trader_for(tmp_path, auto_resume_arm=True)        # no time limit.  A restart: the arming goes on, ladder included
     assert a2.state == "ARMED" and a2.ladder_forced and a2.armed_at == a.armed_at
     a2.armed_at -= 5 * 3600                                 # make it look 5 h old and save
     a2._save_state()
-    a3 = trader_for(tmp_path, auto_resume_arm=True)        # expired: not resumed
+    old = trader_for(tmp_path, auto_resume_arm=True)       # still on: LIVE ends with Paper or a stop, not with the clock
+    assert old.state == "ARMED" and old._may_place(1, {"cutoff": 0}, 1.0) != "arming expired"
+    a3 = trader_for(tmp_path, auto_resume_arm=True, auto_arm_ttl_h=4)       # with a limit set in .env: expired, not resumed
     assert a3.state == "DISARMED"
+    assert "for up to 4 h" in trader_for_armed_message(tmp_path)
     a.arm(1, time.strftime("%Y-%m-%d"), force=True)
     a4 = trader_for(tmp_path, auto_resume_arm=False)       # the switch off: every start is disarmed, as before
     assert a4.state == "DISARMED"
+
+
+def test_a_real_order_only_needs_the_balance_to_cover_its_stake(tmp_path):
+    """The owner's decision of 2026-11-12, after a winning $7.59 step was kept on paper at a balance of $18.90: the
+    'balance must be at least 20 stakes' rule is off.  The balance must still cover the order itself, and
+    AUTO_MIN_BANKROLL_STAKES still works when it is set."""
+    import dataclasses
+    a, rid, rec = checklist_trader(tmp_path, auto_stake_usd=1.0)
+    assert a.cfg.auto_min_bankroll_stakes == 0
+    a.set_progression(1.5)
+    a.set_max_real_run(9, who="test")
+    a.real_run, a.balance_usd = 5, 18.90
+    assert a.stake() == 7.59
+    a._prepared_stake = 7.59
+    assert a._may_place(rid, rec, 7.59) is None                         # placed: $18.90 covers $7.59
+    a.balance_usd = 7.0
+    assert a._may_place(rid, rec, 7.59) == "balance $7.00 is less than the stake $7.59"
+    a.balance_usd = 18.90
+    a.cfg = dataclasses.replace(a.cfg, auto_min_bankroll_stakes=20)      # the old floor, when someone sets it
+    assert a._may_place(rid, rec, 7.59) == "balance $18.90 is below 20 stakes"
+    a.cfg = dataclasses.replace(a.cfg, auto_min_bankroll_stakes=0)
+    a.disarm("test")
+    a.real_run = 0
+    a.arm(0, time.strftime("%Y-%m-%d"), force=True)                     # arming at $18.90: allowed
+    assert a.state == "ARMED"
+    a.disarm("test")
+    a.balance_usd = 0.4
+    with pytest.raises(TradeError, match="below the stake"):
+        a.arm(0, time.strftime("%Y-%m-%d"), force=True)                 # under one base stake: nothing to bet with
