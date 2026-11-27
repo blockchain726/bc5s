@@ -7,6 +7,9 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
 ## Rules the owner set (keep them)
 
 - Secrets only in `.env` (`BC_EMAIL`, `BC_PASS`, `API_TOKEN`): never print them, never commit them. The repo is public.
+  The one copy outside the PC, at the owner's word (2026-11-27 01:50 UTC, before they wiped the PC: "upload env
+  copy ... upload them all"): the PRIVATE repo `blockchain726/bc5s-private` (see "Commands"). Nothing from it
+  goes into this repo.
 - Real money is the owner's decision. Arming the Up/Down bot, switching Tap live to REAL, resetting the run of real
   losses and clearing stops are done from the dashboards with the API token. Do not try to do them another way.
 - Never stop the Tap live bot for a technical reason. Every former stop rule (two rejections, an unanswered order,
@@ -916,3 +919,17 @@ Two bots in one process (`main.py --auto`): the 5 s Up/Down bot (`bcbot/auto.py`
   `logs\obrec\STOP`, wait for the loop to end, delete the file, start `tools\supervise_ob.ps1` again.
 - Git: commit identity `blockchain726 <blockchain726@users.noreply.github.com>`; branch `micro-ensemble`, kept equal
   to `main`.
+- The PC this was built on was wiped by the owner after 2026-11-27 (the bot stopped since 11-26 09:44 UTC). What
+  is not in this repo is in the PRIVATE repo `blockchain726/bc5s-private` (its README says how to put it back):
+  `bot/.env`; `bot/logs/` (the state files `live_state.json` / `auto_settings.json` / `tap_live_state.json`, the
+  round log `auto_rounds.jsonl.gz` with 33,395 rounds, the Tap logs, `obrec/models` = fit 6, `obrec/fwd` = the
+  frozen forward test, `model_lab`); `claude-memory/` (Claude's notes); `scratch/ud4` (the 45 scratch scripts still on
+  the PC that day, written from 2026-11-17 on: `audit1.py` .. `audit6.py`, `next_model*.py`, `ceiling.py`,
+  `value_side.py`, `pool_row.py`, `live_test.py`, `reweigh.py`, `winrate_levers.py`, `row_vs_real*.py`,
+  `ob_end.py`, `ob_lifetime.py`, `ob_stability.py`, `hk_review*.py`, `preview_*.py`, `shot_*.py`; the older ones
+  named in this file, `best1.py` .. `advisor2.py`, `lib2.py`, `refit24.py`, `sep_feeds.py`, `hk6_backtest.py`,
+  `fwd_check.py` and the like, were no longer there); and, as files of its release `recordings-2026-11-26`, the order books of
+  the six markets (858 hourly files, 11-16 05:14 .. 11-27 UTC), of the three extra markets (276) and the three
+  price recordings. Not saved: `.venv`, `logs/research-venv`, the browser profile. On a new PC: every path, PID
+  and "is running" in this file is from the old PC; read `logs/live_state.json` before the first start; the
+  recordings and every forward test have a hole from the stop on.
